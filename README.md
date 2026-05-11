@@ -1,2 +1,3 @@
-# nasberrypi
+<img width="2000" height="700" alt="ChatGPT_Image_May_11_2026_02_06_05_AM" src="https://github.com/user-attachments/assets/ce0fc81a-6091-48d3-8147-b1f207bc3812" />
+
 stay tuned...
