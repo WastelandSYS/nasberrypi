@@ -1,9 +1,16 @@
 #!/bin/bash
+set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
     echo "Please run as root"
-    exit
+    exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="/opt/nasberry"
+BIN_PATH="/usr/local/bin/nasberry"
+APP_PATH="$INSTALL_DIR/nasberrypi.py"
+MOUNT_POINT="${NASBERRY_MOUNT_POINT:-/mnt/nasberry}"
 
 clear
 
@@ -18,17 +25,20 @@ apt-get install -y \
     cifs-utils \
     net-tools
 
-mkdir -p /mnt/nasberry
+install -d -m 755 "$INSTALL_DIR"
+install -m 755 "$SCRIPT_DIR/nasberrypi.py" "$APP_PATH"
 
-chmod 755 /mnt/nasberry
+mkdir -p "$MOUNT_POINT"
+chmod 755 "$MOUNT_POINT"
 
-ln -sf "$(pwd)/nasberry.py" /usr/local/bin/nasberry
-
-chmod +x nasberry.py
+ln -sf "$APP_PATH" "$BIN_PATH"
 
 clear
 
 echo "======================================"
 echo " Nasberry installation complete!"
 echo " Launch using: nasberry"
+echo ""
+echo " Recommended before real NAS use:"
+echo "   export NASBERRY_PIN='your-new-pin'"
 echo "======================================"
