@@ -134,3 +134,15 @@ sudo ./uninstall.sh --purge --remove-mount-point
 ```
 
 The uninstaller never deletes storage data, never automatically unmounts an active drive, never stops Samba globally, validates Samba after managed-share removal, and restores the previous Samba configuration if validation fails. It preserves installed packages because Samba and system utilities may be used by other applications.
+
+---
+
+# LICENSE
+
+Systempi is released under the GNU General Public License v3.0. See [`LICENSE`](LICENSE) for the full license text.
+
+---
+
+# AUTHOR
+
+[WastelandSYS](https://github.com/WastelandSYS)
