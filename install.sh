@@ -1,95 +1,46 @@
 #!/bin/bash
-
 set -euo pipefail
-
-# ======================================
-#         ROOT CHECK
-# ======================================
-
-if [ "$EUID" -ne 0 ]; then
-    echo "Please run as root"
-    exit 1
-fi
-
-# ======================================
-#          PATH CONFIG
-# ======================================
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 INSTALL_DIR="/opt/nasberry"
 APP_PATH="$INSTALL_DIR/nasberrypi.py"
-
 BIN_PATH="/usr/local/bin/nasberry"
-
 MOUNT_POINT="${NASBERRY_MOUNT_POINT:-/mnt/nasberry}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ======================================
-#           INSTALL START
-# ======================================
+log() { printf '%s\n' "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
-clear
+[ "$EUID" -eq 0 ] || die "Run this installer as root: sudo ./install.sh"
 
-echo "======================================"
-echo " Installing Nasberry NAS System..."
-echo "======================================"
+if [ "${1:-}" = "--uninstall" ]; then
+    shift
+    if [ -x "$SCRIPT_DIR/uninstall.sh" ]; then
+        exec "$SCRIPT_DIR/uninstall.sh" "$@"
+    elif [ -x "$INSTALL_DIR/uninstall.sh" ]; then
+        exec "$INSTALL_DIR/uninstall.sh" "$@"
+    fi
+    die "uninstall.sh was not found; download it beside install.sh and try again"
+fi
 
-# ======================================
-#         PACKAGE INSTALL
-# ======================================
+command -v apt-get >/dev/null || die "This installer currently supports Debian, Ubuntu, and Raspberry Pi OS (apt-get required)."
+[ -f "$SCRIPT_DIR/nasberrypi.py" ] || die "nasberrypi.py was not found beside install.sh"
+[ -f "$SCRIPT_DIR/uninstall.sh" ] || die "uninstall.sh was not found beside install.sh"
 
+log "Installing Nasberry dependencies..."
 apt-get update
+apt-get install -y python3 samba cifs-utils util-linux iproute2
 
-apt-get install -y \
-    python3 \
-    python3-pip \
-    samba \
-    cifs-utils \
-    net-tools
-
-# ======================================
-#        INSTALL DIRECTORY
-# ======================================
-
-install -d -m 755 "$INSTALL_DIR"
-
-# ======================================
-#         INSTALL SCRIPT
-# ======================================
-
-install -m 755 \
-    "$SCRIPT_DIR/nasberrypi.py" \
-    "$APP_PATH"
-
-# ======================================
-#          MOUNT POINT
-# ======================================
-
-mkdir -p "$MOUNT_POINT"
-
-chmod 755 "$MOUNT_POINT"
-
-# ======================================
-#         CREATE COMMAND
-# ======================================
-
+install -d -m 755 "$INSTALL_DIR" "$MOUNT_POINT"
+install -m 755 "$SCRIPT_DIR/nasberrypi.py" "$APP_PATH"
+install -m 755 "$SCRIPT_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
 ln -sf "$APP_PATH" "$BIN_PATH"
+hash -r
 
-# ======================================
-#        INSTALL COMPLETE
-# ======================================
-
-clear
-
-echo "======================================"
-echo " Nasberry installation complete!"
-echo ""
-echo " Installed to:"
-echo "   $APP_PATH"
-echo ""
-echo " Launch using:"
-echo "   nasberry"
-echo ""
-echo " Recommended before real NAS use:"
-echo "   export NASBERRY_PIN='your-new-pin'"
-echo "======================================"
+log ""
+log "Nasberry installation complete."
+log "  Application: $APP_PATH"
+log "  Command:     $BIN_PATH"
+log "  Mount point: $MOUNT_POINT"
+log "  Version:     $("$BIN_PATH" --version)"
+log ""
+log "Next step: run 'sudo nasberry setup' to select a drive, create a PIN, and configure Samba."
