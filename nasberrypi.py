@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+# =========================================================
+# nasberrypi
+# NASBERRY NETWORK STORAGE SYSTEM 
+#
+# Copyright (c) 2026 WastelandSYS
+# Licensed under GPLv3
+# =========================================================
+
 import argparse
 import configparser
 import getpass
