@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,30 +26,153 @@ class NasberryTests(unittest.TestCase):
         with mock.patch.object(nasberrypi.os.path, "realpath", side_effect=lambda value: value):
             self.assertEqual(nasberrypi.device_mount_points("/dev/sdb1"), ["/media/user/disk"])
 
-    @mock.patch.object(nasberrypi, "run")
-    @mock.patch.object(nasberrypi, "command_exists", return_value=True)
-    def test_samba_config_rejects_wrong_path(self, _command_exists, run):
-        run.return_value.returncode = 0
-        run.return_value.stdout = "/somewhere/else\n"
+    def test_appliance_config_exports_only_public_with_safe_options(self):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            config = nasberrypi.appliance_samba_config()
+        self.assertIn("[Public]", config)
+        self.assertIn(f"path = {nasberrypi.MOUNT_POINT}/Public", config)
+        self.assertIn("usershare max shares = 0", config)
+        self.assertIn("valid users = kali", config)
+        self.assertIn("force user = kali", config)
+        self.assertNotIn("[homes]", config)
+        self.assertNotIn("[Nasberry]", config)
+        self.assertNotIn("[Private]", config)
+        self.assertNotIn("[Backups]", config)
+
+    @mock.patch.object(nasberrypi, "samba_shares")
+    def test_samba_config_accepts_public_only(self, samba_shares):
+        samba_shares.return_value = {"Public": {"path": nasberrypi.public_share_path(), "available": "yes"}}
+        self.assertEqual(nasberrypi.samba_config_valid(), (True, nasberrypi.public_share_path()))
+
+    @mock.patch.object(nasberrypi, "samba_shares")
+    def test_samba_config_rejects_mount_root(self, samba_shares):
+        samba_shares.return_value = {"Public": {"path": nasberrypi.MOUNT_POINT, "available": "yes"}}
         valid, reason = nasberrypi.samba_config_valid()
         self.assertFalse(valid)
-        self.assertIn("not", reason)
-        run.assert_called_once_with([
-            "testparm",
-            "-s",
-            "--section-name=Nasberry",
-            "--parameter-name=path",
-        ])
+        self.assertIn(nasberrypi.public_share_path(), reason)
+
+    @mock.patch.object(nasberrypi, "samba_shares")
+    def test_samba_config_rejects_other_active_share(self, samba_shares):
+        samba_shares.return_value = {
+            "homes": {"available": "yes"},
+            "Public": {"path": nasberrypi.public_share_path(), "available": "yes"},
+        }
+        valid, reason = nasberrypi.samba_config_valid()
+        self.assertFalse(valid)
+        self.assertIn("[homes]", reason)
+
+    @mock.patch.object(nasberrypi.pwd, "getpwnam")
+    @mock.patch.object(nasberrypi, "lsblk_devices")
+    def test_exfat_mount_options_make_share_user_owner(self, lsblk_devices, getpwnam):
+        lsblk_devices.return_value = [{"path": "/dev/sda1", "fstype": "exfat"}]
+        getpwnam.return_value = mock.Mock(pw_uid=1000, pw_gid=1000)
+        with mock.patch.object(nasberrypi, "DEVICE", "/dev/sda1"), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            self.assertEqual(nasberrypi.storage_mount_options(), ["-o", "uid=1000,gid=1000,umask=0002"])
+
+    @mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "/mnt/nasberry/Public"))
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_validates_candidate_before_replacing_live_config(self, run, _valid):
+        run.return_value.returncode = 0
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text("original config")
+            with mock.patch.object(nasberrypi, "Path", return_value=smb_file), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+                self.assertTrue(nasberrypi.configure_samba_share())
+            self.assertIn("[Public]", smb_file.read_text())
+            self.assertNotIn("original config", smb_file.read_text())
+            self.assertTrue(list(Path(directory).glob("smb.conf.nasberry.*.bak")))
+        self.assertEqual(run.call_args.args[0][:2], ["testparm", "-s"])
+
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_keeps_live_config_when_candidate_is_invalid(self, run):
+        run.return_value.returncode = 1
+        run.return_value.stderr = "invalid"
+        run.return_value.stdout = ""
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text("original config")
+            with mock.patch.object(nasberrypi, "Path", return_value=smb_file), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+                self.assertFalse(nasberrypi.configure_samba_share())
+            self.assertEqual(smb_file.read_text(), "original config")
+
+    @mock.patch.object(nasberrypi, "filesystem_uses_mount_permissions", return_value=False)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    def test_storage_layout_creates_and_protects_posix_folders(self, _is_mounted, _mount_permissions):
+        with tempfile.TemporaryDirectory() as directory:
+            private_file = Path(directory) / "Private" / "keep.txt"
+            private_file.parent.mkdir()
+            private_file.write_text("preserve me")
+            owner = mock.Mock(pw_uid=Path(directory).stat().st_uid, pw_gid=Path(directory).stat().st_gid)
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", directory), mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=owner):
+                self.assertTrue(nasberrypi.ensure_storage_layout())
+            self.assertEqual((Path(directory) / "Public").stat().st_mode & 0o777, 0o775)
+            self.assertEqual((Path(directory) / "Private").stat().st_mode & 0o777, 0o700)
+            self.assertEqual((Path(directory) / "Backups").stat().st_mode & 0o777, 0o700)
+            self.assertEqual(private_file.read_text(), "preserve me")
+
+    @mock.patch.object(nasberrypi, "filesystem_uses_mount_permissions", return_value=False)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    def test_storage_layout_rejects_symlink_without_touching_target(self, _is_mounted, _mount_permissions):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as target:
+            (Path(directory) / "Private").symlink_to(target, target_is_directory=True)
+            owner = mock.Mock(pw_uid=Path(directory).stat().st_uid, pw_gid=Path(directory).stat().st_gid)
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", directory), mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=owner):
+                self.assertFalse(nasberrypi.ensure_storage_layout())
+            self.assertEqual(list(Path(target).iterdir()), [])
+
+    @mock.patch.object(nasberrypi, "storage_filesystem", return_value="exfat")
+    @mock.patch.object(nasberrypi, "filesystem_uses_mount_permissions", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    def test_protected_folder_reports_exfat_limitation(self, _is_mounted, _mount_permissions, _filesystem):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "Private").mkdir()
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", directory):
+                valid, detail = nasberrypi.protected_folder_status("Private")
+            self.assertTrue(valid)
+            self.assertIn("exfat", detail)
+            self.assertIn("local-only", detail)
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    def test_public_folder_access_skips_check_while_storage_is_unmounted(self, _is_mounted):
+        self.assertEqual(
+            nasberrypi.public_folder_access_valid(),
+            (True, "not checked while storage is safely unmounted"),
+        )
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    def test_public_folder_access_reports_configured_user_write_access(self, _is_mounted):
+        with tempfile.TemporaryDirectory() as directory:
+            public = Path(directory) / "Public"
+            public.mkdir()
+            owner = mock.Mock(pw_uid=public.stat().st_uid)
+            with mock.patch.object(nasberrypi, "public_share_path", return_value=str(public)), mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=owner):
+                self.assertEqual(nasberrypi.public_folder_access_valid(), (True, "writable by kali"))
 
     @mock.patch.object(nasberrypi, "run")
     @mock.patch.object(nasberrypi, "command_exists", return_value=True)
-    def test_samba_config_uses_section_name_instead_of_config_filename(self, _command_exists, run):
+    def test_samba_account_reports_enabled_user(self, _command_exists, run):
         run.return_value.returncode = 0
-        run.return_value.stdout = f"{nasberrypi.MOUNT_POINT}\n"
-        valid, _reason = nasberrypi.samba_config_valid()
-        self.assertTrue(valid)
-        self.assertNotIn(nasberrypi.SHARE_NAME, run.call_args.args[0][1:])
-        self.assertIn(f"--section-name={nasberrypi.SHARE_NAME}", run.call_args.args[0])
+        run.return_value.stdout = "Unix username: kali\nAccount Flags: [U          ]\n"
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            self.assertEqual(nasberrypi.samba_account_valid(), (True, "enabled for kali"))
+        run.assert_called_once_with(["pdbedit", "-L", "-v", "kali"])
+
+    @mock.patch.object(nasberrypi, "run")
+    @mock.patch.object(nasberrypi, "command_exists", return_value=True)
+    def test_samba_account_reports_disabled_user(self, _command_exists, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "Account Flags: [DU         ]\n"
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            valid, detail = nasberrypi.samba_account_valid()
+        self.assertFalse(valid)
+        self.assertIn("disabled", detail)
+
+    def test_windows_credential_hint_shows_session_reset_command(self):
+        with mock.patch("builtins.print") as output:
+            nasberrypi.print_windows_credential_hint()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("net use * /delete /y", rendered)
+        self.assertIn("Public", rendered)
 
     def test_usable_address_only_accepts_non_local_ipv4(self):
         self.assertTrue(nasberrypi.usable_address("192.168.1.25"))
@@ -74,13 +198,20 @@ class NasberryTests(unittest.TestCase):
         ]}"""
         self.assertEqual([item["path"] for item in nasberrypi.lsblk_devices()], ["/dev/sda1"])
 
-    @mock.patch.object(nasberrypi, "service_exists", return_value=False)
+    @mock.patch.object(nasberrypi, "restart_samba_service", return_value=True)
     @mock.patch.object(nasberrypi, "configure_samba_share", return_value=True)
+    @mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True)
+    @mock.patch.object(nasberrypi, "mount_storage", return_value=True)
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
-    def test_repair_samba_share_recreates_and_validates_share(self, _geteuid, configure, _service_exists):
+    def test_repair_samba_share_mounts_repairs_and_restarts(
+        self, _geteuid, mount_storage, ensure_layout, configure, restart
+    ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
             self.assertTrue(nasberrypi.repair_samba_share())
+        mount_storage.assert_called_once_with(repair_permissions=True)
+        ensure_layout.assert_called_once_with()
         configure.assert_called_once_with()
+        restart.assert_called_once_with()
 
 
 if __name__ == "__main__":
