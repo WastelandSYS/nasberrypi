@@ -19,6 +19,19 @@ Nasberry turns a Raspberry Pi or Debian-based Linux computer and a formatted USB
 - A formatted USB storage drive. Nasberry does **not** format drives.
 - Root access for installation and setup.
 
+## Test a local checkout before publishing
+
+You do not need to push to GitHub or install Nasberry to test current local changes on the Raspberry Pi. From the checkout directory, run the source file directly with root privileges:
+
+```bash
+sudo ./nasberrypi.py --version
+sudo ./nasberrypi.py setup
+sudo ./nasberrypi.py repair-samba
+sudo ./nasberrypi.py doctor
+```
+
+Running `sudo nasberry ...` uses the separately installed copy in `/opt/nasberry`, which may be older than the checkout. Once the checkout works correctly, install that exact local version with `sudo ./install.sh`.
+
 ## Install and first-time setup
 
 ```bash
@@ -26,9 +39,11 @@ sudo ./install.sh
 sudo nasberry setup
 ```
 
-Setup detects available drives, asks which drive to use, creates a PIN and Samba password, stores configuration in `/etc/nasberry/config.ini`, and adds a managed Samba share to `/etc/samba/smb.conf`.
+Setup detects available drives, asks which drive to use, creates a PIN and Samba password, stores configuration in `/etc/nasberry/config.ini`, creates `/mnt/nasberry/Public`, `/mnt/nasberry/Private`, and `/mnt/nasberry/Backups`, and configures Samba appliance mode so only `[Public]` is active.
 
-> Setup creates `/etc/samba/smb.conf.nasberry.bak` before changing Samba configuration. It configures access for an existing Linux user and runs `smbpasswd` to create that user’s network password. Adjust the generated share policy if needed for your environment.
+> Setup preserves the previous Samba configuration in a timestamped `/etc/samba/smb.conf.nasberry.*.bak` file, then installs a minimal appliance configuration containing only `[Public]`. The candidate configuration is checked with `testparm` before it replaces the active configuration, and Samba restarts only after final validation passes.
+
+Setup and `repair-samba` mount the selected SSD at the configured mount point before creating the storage layout. Only `Public` is exported over Samba; `Private` and `Backups` remain local-only. On POSIX filesystems, Nasberry sets `Public` to mode `0775` and protects `Private` and `Backups` with mode `0700`. FAT, exFAT, and NTFS drives receive owner mount options because those filesystems do not support independent Unix permissions for individual folders.
 
 ## Everyday use
 
@@ -58,13 +73,13 @@ Starting or stopping normal file sharing requires the PIN created during setup. 
 When the share starts, Nasberry prints connection addresses similar to:
 
 ```text
-Windows:     \\192.168.1.25\Nasberry
-macOS/Linux: smb://192.168.1.25/Nasberry
+Windows:     \\192.168.1.25\Public
+macOS/Linux: smb://192.168.1.25/Public
 ```
 
 ## Configuration
 
-The persistent configuration file is `/etc/nasberry/config.ini` when Nasberry runs as root. Environment variables such as `NASBERRY_DEVICE`, `NASBERRY_MOUNT_POINT`, and `NASBERRY_SHARE_NAME` can temporarily override settings.
+The persistent configuration file is `/etc/nasberry/config.ini` when Nasberry runs as root. Environment variables such as `NASBERRY_DEVICE` and `NASBERRY_MOUNT_POINT` can temporarily override settings. The appliance share name is always `Public`.
 
 Safe mode is opt-in because disabling Samba may affect unrelated shares. Run it explicitly with:
 
@@ -84,23 +99,33 @@ sudo nasberry doctor
 
 If a drive is missing or changed, reconnect it and run `sudo nasberry setup`. If a drive will not unmount, close files and applications using it before trying again.
 
-Nasberry setup adds a managed `[Nasberry]` section to `/etc/samba/smb.conf`, validates that section with `testparm`, and runs `smbpasswd` for the selected Linux user. To inspect the generated share manually, run:
+Nasberry setup installs a minimal Samba appliance configuration containing only an authenticated `[Public]` share. Before replacement, the previous Samba configuration is preserved in a timestamped backup. This prevents Windows from browsing `[homes]`, printer shares, the legacy mount-root share, or custom shares while Nasberry appliance mode is active. The Public share also disables symbolic-link traversal outside its folder.
 
 ```bash
-sudo testparm -s --section-name=Nasberry
-sudo testparm -s --section-name=Nasberry --parameter-name=path
-```
-
-The second command should print `/mnt/nasberry`. If it does not, run `sudo nasberry repair-samba`.
-
-If diagnostics say `Load smb config files from Nasberry`, an older installed copy is still running. Update the local repository and reinstall it before repairing Samba:
-
-```bash
-sudo ./install.sh
-nasberry --version        # Must report Nasberry 0.2.1 or newer
-sudo nasberry doctor      # Shows the running version and application path
 sudo nasberry repair-samba
+sudo testparm -s --section-name=Public --parameter-name=path
+sudo testparm -s
 ```
+
+The path command should print `/mnt/nasberry/Public`, and `sudo testparm -s` should list no share sections other than `[Public]`. Windows should connect to `\\<pi-ip>\Public` and cannot move above that share root.
+
+If setup changes the Samba password, Windows may keep using its previous cached SMB session. Close open NAS windows, run the following in Windows Command Prompt, then reconnect to `\\<pi-ip>\Public` with the new password:
+
+```bat
+net use * /delete /y
+```
+
+`nasberry doctor` separately checks the Public-only Samba configuration, Public-folder ownership/write access, local-only `Private` and `Backups` protection, and whether the configured Samba account exists and is enabled. When storage is safely unmounted, doctor reports folder checks as not checked instead of incorrectly reporting them missing. On exFAT/FAT/NTFS, doctor explains that the local-only folders cannot have independent Unix modes.
+
+If setup says `[Public]` points to `/mnt/nasberry/Public`, but incorrectly expects `/mnt/nasberry`, the installed `sudo nasberry` command is older than the checkout. Test the checkout directly first; no GitHub push or pull is required:
+
+```bash
+sudo ./nasberrypi.py --version
+sudo ./nasberrypi.py repair-samba
+sudo ./nasberrypi.py doctor
+```
+
+After the checkout works, `sudo ./install.sh` copies that exact local source into `/opt/nasberry` and updates the `nasberry` command.
 
 The repair command recreates and validates the Samba share without asking you to select the drive or replace your Nasberry PIN again.
 
