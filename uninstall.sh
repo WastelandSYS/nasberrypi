@@ -6,7 +6,7 @@ BIN_PATH="${NASBERRY_BIN_PATH:-/usr/local/bin/nasberry}"
 CONFIG_DIR="${NASBERRY_CONFIG_DIR:-/etc/nasberry}"
 SMB_CONF="${NASBERRY_SMB_CONF:-/etc/samba/smb.conf}"
 MOUNT_POINT="${NASBERRY_MOUNT_POINT:-/mnt/nasberry}"
-SHARE_NAME="${NASBERRY_SHARE_NAME:-Nasberry}"
+SHARE_NAME="${NASBERRY_SHARE_NAME:-Public}"
 PURGE=false
 REMOVE_MOUNT_POINT=false
 DRY_RUN=false
@@ -56,12 +56,12 @@ run_action() {
 remove_managed_share() {
     [ -f "$SMB_CONF" ] || { log "Samba config not found; skipping managed-share cleanup."; return 0; }
     local marker="# Managed by Nasberry: $SHARE_NAME"
-    if ! grep -Fq "$marker" "$SMB_CONF"; then
-        log "No Nasberry-managed Samba share found; leaving Samba configuration unchanged."
+    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF"; then
+        log "No Nasberry-managed Samba settings found; leaving Samba configuration unchanged."
         return 0
     fi
     if "$DRY_RUN"; then
-        log "Would remove the managed [$SHARE_NAME] share from $SMB_CONF after validation."
+        log "Would remove Nasberry-managed Samba settings from $SMB_CONF after validation."
         return 0
     fi
 
@@ -79,8 +79,24 @@ marker = sys.argv[3]
 lines = source.read_text().splitlines(keepends=True)
 output = []
 skipping = False
+skip_disabled_setting = False
 for line in lines:
-    if line.strip() == marker:
+    stripped = line.strip()
+    if stripped == "# Nasberry appliance mode: disable share":
+        skip_disabled_setting = True
+        continue
+    if skip_disabled_setting:
+        skip_disabled_setting = False
+        continue
+    if stripped == "# BEGIN Managed by Nasberry appliance mode":
+        skipping = True
+        continue
+    if stripped == "# END Managed by Nasberry appliance mode":
+        skipping = False
+        continue
+    if stripped in {"# Managed by Nasberry appliance mode", "usershare max shares = 0"}:
+        continue
+    if stripped == marker:
         skipping = True
         continue
     if skipping and line.lstrip().startswith("["):
