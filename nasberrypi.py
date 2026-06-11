@@ -26,13 +26,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.5"
 DEFAULT_CONFIG_FILE = "/etc/nasberry/config.ini" if os.geteuid() == 0 else "~/.config/nasberry/config.ini"
 CONFIG_FILE = Path(os.path.expanduser(os.environ.get("NASBERRY_CONFIG_FILE", DEFAULT_CONFIG_FILE)))
 DEFAULTS = {
     "device": "/dev/disk/by-label/NasberryDRV",
     "mount_point": "/mnt/nasberry",
-    "share_name": "Nasberry",
+    "share_name": "Public",
     "share_user": "",
     "samba_service": "smbd",
     "samba_services": "smbd,nmbd,winbind",
@@ -58,7 +58,7 @@ def refresh_settings():
     global DEVICE, MOUNT_POINT, SHARE_NAME, SHARE_USER, SAMBA_SERVICE, SAMBA_SERVICES, STATE_FILE, CHECK_DELAY, SAFE_MODE_ON_START
     DEVICE = setting("device")
     MOUNT_POINT = setting("mount_point")
-    SHARE_NAME = setting("share_name")
+    SHARE_NAME = "Public"
     SHARE_USER = setting("share_user")
     SAMBA_SERVICE = setting("samba_service")
     SAMBA_SERVICES = [item.strip() for item in setting("samba_services").split(",") if item.strip()]
@@ -167,6 +167,26 @@ def device_mount_points(device_path=None):
     return []
 
 
+def storage_filesystem():
+    target = os.path.realpath(DEVICE)
+    device = next((item for item in lsblk_devices() if os.path.realpath(item.get("path") or "") == target), None)
+    return (device.get("fstype") or "").lower() if device else ""
+
+
+def filesystem_uses_mount_permissions():
+    return storage_filesystem() in {"exfat", "fat", "msdos", "ntfs", "ntfs3", "fuseblk", "vfat"}
+
+
+def storage_mount_options():
+    if not filesystem_uses_mount_permissions() or not SHARE_USER:
+        return []
+    try:
+        owner = pwd.getpwnam(SHARE_USER)
+    except KeyError:
+        return []
+    return ["-o", f"uid={owner.pw_uid},gid={owner.pw_gid},umask=0002"]
+
+
 def is_mounted():
     return os.path.ismount(MOUNT_POINT)
 
@@ -195,10 +215,19 @@ def cleanup_other_mounts():
     return True
 
 
-def mount_storage():
+def mount_storage(repair_permissions=False):
     if not ensure_mount_point() or not cleanup_other_mounts():
         write_state(False, service_active())
         return False
+    options = storage_mount_options()
+    if is_mounted() and repair_permissions and options:
+        if service_active() and not stop_share():
+            log("✖ Could not stop sharing before repairing storage permissions")
+            return False
+        result = run(sudo_cmd("umount", MOUNT_POINT))
+        if result.returncode != 0:
+            log(f"✖ Could not remount storage: {result.stderr.strip() or 'device may be busy'}")
+            return False
     if is_mounted():
         log("✔ Storage is already mounted")
         write_state(True, service_active())
@@ -210,7 +239,7 @@ def mount_storage():
         write_state(False, service_active())
         return False
     log(f"Mounting {DEVICE} at {MOUNT_POINT}...")
-    result = run(sudo_cmd("mount", DEVICE, MOUNT_POINT))
+    result = run(sudo_cmd("mount", *options, DEVICE, MOUNT_POINT))
     time.sleep(CHECK_DELAY)
     mounted = result.returncode == 0 and is_mounted()
     if mounted:
@@ -272,21 +301,102 @@ def unmount_storage():
     return unmounted
 
 
-def samba_config_valid():
+def public_share_path():
+    return os.path.join(MOUNT_POINT, "Public")
+
+
+def storage_folder_path(name):
+    return os.path.join(MOUNT_POINT, name)
+
+
+def ensure_storage_layout():
+    if not SHARE_USER:
+        log("✖ No Samba user is configured")
+        return False
+    if not is_mounted():
+        log("✖ Refusing to create the storage layout while storage is unmounted")
+        return False
+    try:
+        owner = pwd.getpwnam(SHARE_USER)
+        mount_permissions = filesystem_uses_mount_permissions()
+        for name, mode in (("Public", 0o775), ("Private", 0o700), ("Backups", 0o700)):
+            folder = Path(storage_folder_path(name))
+            if folder.is_symlink():
+                raise OSError(f"{name} folder must not be a symbolic link")
+            folder.mkdir(parents=True, exist_ok=True)
+            if not mount_permissions:
+                os.chown(folder, owner.pw_uid, owner.pw_gid)
+                os.chmod(folder, mode)
+            entry = folder.stat()
+            if entry.st_uid != owner.pw_uid or not (entry.st_mode & 0o200):
+                raise OSError(f"{name} folder is not owned and writable by the configured share user")
+        return True
+    except (KeyError, OSError) as exc:
+        log(f"✖ Could not prepare storage folders under {MOUNT_POINT}: {exc}")
+        return False
+
+
+def ensure_public_folder():
+    """Compatibility wrapper used by the online path; setup/repair manage the full layout."""
+    if not SHARE_USER:
+        log("✖ No Samba user is configured")
+        return False
+    if not is_mounted():
+        log("✖ Refusing to create Public while storage is unmounted")
+        return False
+    try:
+        owner = pwd.getpwnam(SHARE_USER)
+        folder = Path(public_share_path())
+        if folder.is_symlink():
+            raise OSError("Public folder must not be a symbolic link")
+        folder.mkdir(parents=True, exist_ok=True)
+        if not filesystem_uses_mount_permissions():
+            os.chown(folder, owner.pw_uid, owner.pw_gid)
+            os.chmod(folder, 0o775)
+        entry = folder.stat()
+        if entry.st_uid != owner.pw_uid or not (entry.st_mode & 0o200):
+            raise OSError("Public folder is not owned and writable by the configured share user")
+        return True
+    except (KeyError, OSError) as exc:
+        log(f"✖ Could not make {public_share_path()} writable by {SHARE_USER}: {exc}")
+        return False
+
+
+def samba_shares():
     if not command_exists("testparm"):
-        return False, "testparm is not installed"
-    result = run([
-        "testparm",
-        "-s",
-        f"--section-name={SHARE_NAME}",
-        "--parameter-name=path",
-    ])
+        return None
+    result = run(["testparm", "-s"])
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        return False, detail or f"share [{SHARE_NAME}] was not found"
-    configured_path = result.stdout.strip()
-    if os.path.realpath(configured_path) != os.path.realpath(MOUNT_POINT):
-        return False, f"share [{SHARE_NAME}] points to {configured_path or 'no path'}, not {MOUNT_POINT}"
+        return None
+    shares = {}
+    current = None
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            if current.lower() != "global":
+                shares[current] = {}
+        elif current in shares and "=" in line:
+            key, value = line.split("=", 1)
+            shares[current][key.strip().lower()] = value.strip()
+    return shares
+
+
+def samba_config_valid():
+    shares = samba_shares()
+    if shares is None:
+        return False, "testparm could not read the Samba configuration"
+    public = shares.get("Public")
+    if not public:
+        return False, "share [Public] was not found"
+    configured_path = public.get("path", "")
+    expected_path = public_share_path()
+    if os.path.abspath(configured_path) != os.path.abspath(expected_path):
+        return False, f"share [Public] points to {configured_path or 'no path'}, not {expected_path}"
+    active = [name for name, options in shares.items() if options.get("available", "yes").lower() not in {"no", "false"}]
+    if set(active) != {"Public"}:
+        detail = ", ".join(f"[{name}]" for name in active) or "none"
+        return False, f"active Samba shares are {detail}; only [Public] is allowed"
     return True, configured_path
 
 
@@ -295,13 +405,16 @@ def start_share():
         log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. Run 'nasberry doctor'.")
         write_state(is_mounted(), False)
         return False
+    if not is_mounted() and not mount_storage():
+        log("✖ Refusing to start sharing without mounted storage")
+        return False
+    if not ensure_public_folder():
+        log("✖ Refusing to start sharing without a safe, writable Public folder")
+        return False
     valid, reason = samba_config_valid()
     if not valid:
         log(f"✖ Samba configuration is not ready: {reason}")
-        log("Run 'sudo nasberry setup' to create or repair the share.")
-        return False
-    if not is_mounted() and not mount_storage():
-        log("✖ Refusing to start sharing without mounted storage")
+        log("Run 'sudo nasberry repair-samba' to recreate it.")
         return False
     log("Starting file sharing...")
     result = run(sudo_cmd("systemctl", "start", SAMBA_SERVICE))
@@ -435,6 +548,73 @@ def check(label, ok, detail, fix=""):
     return ok
 
 
+def public_folder_access_valid():
+    if not is_mounted():
+        return True, "not checked while storage is safely unmounted"
+    folder = Path(public_share_path())
+    if folder.is_symlink():
+        return False, "Public folder is a symbolic link"
+    if not folder.is_dir():
+        return False, f"missing: {folder}"
+    if not SHARE_USER:
+        return False, "no configured share user"
+    try:
+        owner = pwd.getpwnam(SHARE_USER)
+        entry = folder.stat()
+    except (KeyError, OSError) as exc:
+        return False, str(exc)
+    if entry.st_uid != owner.pw_uid:
+        return False, f"owned by UID {entry.st_uid}, expected {owner.pw_uid} ({SHARE_USER})"
+    if not (entry.st_mode & 0o200):
+        return False, f"not writable by owner {SHARE_USER}"
+    return True, f"writable by {SHARE_USER}"
+
+
+def protected_folder_status(name):
+    if not is_mounted():
+        return True, "not checked while storage is safely unmounted"
+    folder = Path(storage_folder_path(name))
+    if folder.is_symlink():
+        return False, f"{name} folder is a symbolic link"
+    if not folder.is_dir():
+        return False, f"missing: {folder}"
+    if filesystem_uses_mount_permissions():
+        filesystem = storage_filesystem() or "this filesystem"
+        return True, f"local-only; {filesystem} has no per-folder Unix permissions"
+    if not SHARE_USER:
+        return False, "no configured share user"
+    try:
+        owner = pwd.getpwnam(SHARE_USER)
+        entry = folder.stat()
+    except (KeyError, OSError) as exc:
+        return False, str(exc)
+    mode = entry.st_mode & 0o777
+    if entry.st_uid != owner.pw_uid or mode != 0o700:
+        return False, f"expected owner {SHARE_USER} and mode 0700; found UID {entry.st_uid} mode {mode:04o}"
+    return True, f"local-only, owned by {SHARE_USER}, mode 0700"
+
+
+def samba_account_valid():
+    if not SHARE_USER:
+        return False, "no configured share user"
+    if not command_exists("pdbedit"):
+        return False, "pdbedit is unavailable"
+    result = run(["pdbedit", "-L", "-v", SHARE_USER])
+    if result.returncode != 0:
+        return False, f"Samba account {SHARE_USER!r} was not found"
+    flags = next((line.split(":", 1)[1].strip() for line in result.stdout.splitlines() if line.strip().lower().startswith("account flags:")), "")
+    if "D" in flags:
+        return False, f"Samba account {SHARE_USER!r} is disabled"
+    return True, f"enabled for {SHARE_USER}"
+
+
+def print_windows_credential_hint():
+    print("\nIf Windows previously connected with a different Samba password:")
+    print("  1. Open Command Prompt on Windows.")
+    print("  2. Run: net use * /delete /y")
+    print("  3. Reconnect to the Public share using the new Samba password.")
+
+
 def doctor():
     print("Nasberry diagnostics\n====================")
     results = []
@@ -448,7 +628,14 @@ def doctor():
     results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}"))
     results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup."))
     valid, reason = samba_config_valid()
-    results.append(check("Samba share", valid, reason, "Run 'sudo nasberry setup' to create it."))
+    results.append(check("Samba share", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it."))
+    public_ok, public_detail = public_folder_access_valid()
+    results.append(check("Public folder access", public_ok, public_detail, "Run 'sudo nasberry repair-samba' to repair it."))
+    for folder_name in ("Private", "Backups"):
+        protected_ok, protected_detail = protected_folder_status(folder_name)
+        results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it."))
+    account_ok, account_detail = samba_account_valid()
+    results.append(check("Samba account", account_ok, account_detail, f"Run 'sudo smbpasswd -a {SHARE_USER}' to create or reset it." if SHARE_USER else "Run 'sudo nasberry setup'."))
     print_connection_info()
     print(f"\nResult: {sum(results)}/{len(results)} checks passed")
     return all(results)
@@ -472,6 +659,16 @@ def choose_device(non_interactive=False):
         return None
 
 
+def restart_samba_service():
+    if not service_exists(SAMBA_SERVICE):
+        return True
+    result = run(sudo_cmd("systemctl", "restart", SAMBA_SERVICE))
+    if result.returncode != 0:
+        log(f"✖ Samba restart failed: {result.stderr.strip()}")
+        return False
+    return True
+
+
 def repair_samba_share():
     if os.geteuid() != 0:
         log("✖ Samba repair must run as root: sudo nasberry repair-samba")
@@ -479,17 +676,41 @@ def repair_samba_share():
     if not SHARE_USER:
         log("✖ No Samba user is configured. Run 'sudo nasberry setup' first.")
         return False
-    configured = configure_samba_share()
-    if not configured:
+    if not mount_storage(repair_permissions=True) or not ensure_storage_layout() or not configure_samba_share():
         log("✖ Samba repair failed. Review the validation error above.")
         return False
-    if service_exists(SAMBA_SERVICE):
-        result = run(sudo_cmd("systemctl", "restart", SAMBA_SERVICE))
-        if result.returncode != 0:
-            log(f"✖ Share configured, but Samba restart failed: {result.stderr.strip()}")
-            return False
+    if not restart_samba_service():
+        return False
     log("✔ Samba share repaired and validated")
     return True
+
+
+def appliance_samba_config():
+    return f"""# Managed by Nasberry appliance mode. Previous config is saved before replacement.
+[global]
+   workgroup = WORKGROUP
+   server role = standalone server
+   security = user
+   map to guest = never
+   usershare max shares = 0
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+
+[Public]
+   path = {public_share_path()}
+   browseable = yes
+   available = yes
+   read only = no
+   guest ok = no
+   valid users = {SHARE_USER}
+   force user = {SHARE_USER}
+   follow symlinks = no
+   wide links = no
+   create mask = 0664
+   directory mask = 0775
+"""
 
 
 def configure_samba_share():
@@ -497,26 +718,24 @@ def configure_samba_share():
     if not smb_file.exists():
         log("✖ /etc/samba/smb.conf was not found")
         return False
-    marker = f"# Managed by Nasberry: {SHARE_NAME}"
-    text = smb_file.read_text()
-    original_text = text
-    user_lines = f"   valid users = {SHARE_USER}\n   force user = {SHARE_USER}\n" if SHARE_USER else ""
-    block = f"\n{marker}\n[{SHARE_NAME}]\n   path = {MOUNT_POINT}\n   browseable = yes\n   read only = no\n   guest ok = no\n{user_lines}   create mask = 0664\n   directory mask = 0775\n"
-    if marker in text:
-        start = text.index(marker)
-        next_section = text.find("\n[", start + len(marker))
-        text = text[:start] + block.strip() + "\n" + (text[next_section + 1:] if next_section != -1 else "")
-    else:
-        text += block
-    backup = smb_file.with_suffix(".conf.nasberry.bak")
-    if not backup.exists():
-        shutil.copy2(smb_file, backup)
-    smb_file.write_text(text)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    backup = smb_file.with_name(f"{smb_file.name}.nasberry.{timestamp}.bak")
+    candidate = smb_file.with_name(f"{smb_file.name}.nasberry.candidate")
+    shutil.copy2(smb_file, backup)
+    log(f"Preserved previous Samba configuration at {backup}")
+    candidate.write_text(appliance_samba_config())
+    syntax = run(["testparm", "-s", str(candidate)])
+    if syntax.returncode != 0:
+        candidate.unlink(missing_ok=True)
+        detail = syntax.stderr.strip() or syntax.stdout.strip() or "testparm rejected the candidate configuration"
+        log(f"✖ Samba config validation failed: {detail}")
+        return False
+    os.replace(candidate, smb_file)
     valid, reason = samba_config_valid()
     if valid:
-        log("✔ Samba share configured")
+        log("✔ Samba configured with only [Public] active")
         return True
-    smb_file.write_text(original_text)
+    shutil.copy2(backup, smb_file)
     log(f"✖ Samba config validation failed: {reason}")
     log("✔ Restored the previous Samba configuration")
     return False
@@ -531,7 +750,7 @@ def setup(non_interactive=False, skip_pin=False):
         return False
     settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}" if selected.get("uuid") else selected.get("path")
     settings["mount_point"] = MOUNT_POINT
-    settings["share_name"] = SHARE_NAME
+    settings["share_name"] = "Public"
     if not non_interactive:
         default_user = os.environ.get("SUDO_USER") or getpass.getuser()
         share_user = input(f"Linux user allowed to access the share [{default_user}]: ").strip() or default_user
@@ -553,16 +772,21 @@ def setup(non_interactive=False, skip_pin=False):
         settings["pin_hash"] = hash_pin(first)
     save_config()
     refresh_settings()
-    ensure_mount_point()
-    configured = configure_samba_share()
+    configured = mount_storage(repair_permissions=True) and ensure_storage_layout() and configure_samba_share()
+    password_updated = False
     if configured and settings.get("share_user") and not non_interactive and command_exists("smbpasswd"):
         log(f"Set the Samba network password for {settings['share_user']}:")
         password_result = subprocess.run(["smbpasswd", "-a", settings["share_user"]], check=False)
         configured = password_result.returncode == 0
+        password_updated = configured
         if not configured:
             log("✖ Samba password setup failed")
     if configured:
+        configured = restart_samba_service()
+    if configured:
         log(f"✔ Setup complete; configuration saved to {CONFIG_FILE}")
+        if password_updated:
+            print_windows_credential_hint()
     else:
         log(f"✖ Setup incomplete. Core settings were saved to {CONFIG_FILE}, but Samba is not ready.")
         log("Update/reinstall Nasberry, then run 'sudo nasberry repair-samba'.")
