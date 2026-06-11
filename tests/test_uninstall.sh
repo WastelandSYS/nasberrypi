@@ -12,9 +12,16 @@ cat > "$TMP/etc/samba/smb.conf" <<'EOF'
 [global]
    workgroup = WORKGROUP
 
-# Managed by Nasberry: Nasberry
-[Nasberry]
-   path = /mnt/nasberry
+   # Managed by Nasberry appliance mode
+   usershare max shares = 0
+
+# BEGIN Managed by Nasberry appliance mode
+[homes]
+   # Nasberry appliance mode: disable share
+   available = no
+[Public]
+   path = /mnt/nasberry/Public
+# END Managed by Nasberry appliance mode
 
 [OtherShare]
    path = /srv/other
@@ -34,7 +41,7 @@ run_uninstall --yes
 [ ! -e "$TMP/opt/nasberry" ]
 [ ! -e "$TMP/usr/local/bin/nasberry" ]
 [ -f "$TMP/etc/nasberry/config.ini" ]
-grep -Fq '[Nasberry]' "$TMP/etc/samba/smb.conf"
+grep -Fq '[Public]' "$TMP/etc/samba/smb.conf"
 
 mkdir -p "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/etc/nasberry"
 printf 'app\n' > "$TMP/opt/nasberry/nasberrypi.py"
@@ -43,8 +50,11 @@ printf 'config\n' > "$TMP/etc/nasberry/config.ini"
 run_uninstall --yes --purge --remove-mount-point
 [ ! -e "$TMP/etc/nasberry" ]
 [ ! -e "$TMP/mnt/nasberry" ]
-! grep -Fq '[Nasberry]' "$TMP/etc/samba/smb.conf"
+! grep -Fq '[Public]' "$TMP/etc/samba/smb.conf"
 grep -Fq '[OtherShare]' "$TMP/etc/samba/smb.conf"
+! grep -Fq 'usershare max shares = 0' "$TMP/etc/samba/smb.conf"
+! grep -Fq 'Nasberry appliance mode: disable share' "$TMP/etc/samba/smb.conf"
+! grep -Fq 'available = no' "$TMP/etc/samba/smb.conf"
 
 mkdir -p "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/etc/nasberry" "$TMP/mnt/nasberry"
 printf 'app\n' > "$TMP/opt/nasberry/nasberrypi.py"
