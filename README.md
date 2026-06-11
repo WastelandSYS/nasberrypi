@@ -45,6 +45,12 @@ Setup detects available drives, asks which drive to use, creates a PIN and Samba
 
 Setup and `repair-samba` mount the selected SSD at the configured mount point before creating the storage layout. Only `Public` is exported over Samba; `Private` and `Backups` remain local-only. On POSIX filesystems, Nasberry sets `Public` to mode `0775` and protects `Private` and `Backups` with mode `0700`. FAT, exFAT, and NTFS drives receive owner mount options because those filesystems do not support independent Unix permissions for individual folders.
 
+## Terminal interface
+
+Running `nasberry` without a command opens a responsive, keyboard-driven dashboard. Use the arrow keys (or `J`/`K`) to move, Enter to open an action, number keys as shortcuts, and `Q` to exit. The dashboard adapts to narrow terminals and keeps system status, actions, and navigation guidance visually separate.
+
+Nasberry v0.2.5 remains the functional baseline for the interface. The tested hardware is Raspberry Pi OS with an exFAT SSD. Windows must see only `\\<pi-ip>\Public`; `Private` and `Backups` remain local-only. Interface work must not change storage layout, permissions, Samba behavior, PIN behavior, safe mode, setup/repair/doctor behavior, installer/uninstaller behavior, online/offline flow, or safe unmount behavior without explicit approval.
+
 ## Everyday use
 
 Run the beginner-friendly menu:
