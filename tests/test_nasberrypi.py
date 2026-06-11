@@ -167,6 +167,53 @@ class NasberryTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertIn("disabled", detail)
 
+    def test_panel_adapts_to_small_terminal_width(self):
+        rendered = nasberrypi.panel("STATUS", ["A long status message that must wrap cleanly"], width=24)
+        self.assertTrue(all(len(line) == 24 for line in rendered))
+        self.assertGreater(len(rendered), 3)
+
+    @mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free of 20 GB")
+    @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "device_exists", return_value=True)
+    def test_menu_status_keeps_private_and_backups_local_only(self, _device, _mounted, _sharing, _usage):
+        rendered = "\n".join(nasberrypi.menu_status_lines())
+        self.assertIn("Public network share only", rendered)
+        self.assertIn("Private + Backups local-only", rendered)
+
+    @mock.patch("builtins.print")
+    @mock.patch.object(nasberrypi, "show_menu_exit")
+    @mock.patch.object(nasberrypi, "render_menu", return_value="dashboard")
+    @mock.patch.object(nasberrypi, "read_menu_key", return_value="q")
+    @mock.patch.object(nasberrypi, "clear")
+    def test_menu_q_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
+        with mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+            self.assertFalse(nasberrypi.state["running"])
+        show_exit.assert_called_once_with()
+
+    @mock.patch("builtins.print")
+    @mock.patch.object(nasberrypi, "show_menu_exit")
+    @mock.patch.object(nasberrypi, "render_menu", return_value="dashboard")
+    @mock.patch.object(nasberrypi, "read_menu_key", return_value="\x03")
+    @mock.patch.object(nasberrypi, "clear")
+    def test_menu_ctrl_c_key_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
+        with mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+            self.assertFalse(nasberrypi.state["running"])
+        show_exit.assert_called_once_with()
+
+    @mock.patch("builtins.print")
+    @mock.patch.object(nasberrypi, "show_menu_exit")
+    @mock.patch.object(nasberrypi, "render_menu", return_value="dashboard")
+    @mock.patch.object(nasberrypi, "read_menu_key", side_effect=KeyboardInterrupt)
+    @mock.patch.object(nasberrypi, "clear")
+    def test_menu_keyboard_interrupt_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
+        with mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+            self.assertFalse(nasberrypi.state["running"])
+        show_exit.assert_called_once_with()
+
     def test_windows_credential_hint_shows_session_reset_command(self):
         with mock.patch("builtins.print") as output:
             nasberrypi.print_windows_credential_hint()
