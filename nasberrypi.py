@@ -22,6 +22,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import termios
+import textwrap
+import tty
 import time
 from datetime import datetime
 from pathlib import Path
@@ -793,6 +796,95 @@ def setup(non_interactive=False, skip_pin=False):
     return configured
 
 
+def terminal_width():
+    return max(24, min(shutil.get_terminal_size(fallback=(80, 24)).columns, 100))
+
+
+def fit_text(text, width):
+    return text if len(text) <= width else text[:max(1, width - 1)] + "…"
+
+
+def highlight(text):
+    if sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb" and "NO_COLOR" not in os.environ:
+        return f"\033[1;30;46m{text}\033[0m"
+    return text
+
+
+def panel(title, lines, width=None, selected=None):
+    width = width or terminal_width()
+    inner = width - 4
+    rule = "─" * (width - len(title) - 5)
+    output = [f"┌─ {title} {rule}┐"]
+    for index, line in enumerate(lines):
+        wrapped = textwrap.wrap(str(line), inner, break_long_words=True, break_on_hyphens=False) or [""]
+        for part in wrapped:
+            content = f" {fit_text(part, inner):<{inner}} "
+            output.append(f"│{highlight(content) if index == selected else content}│")
+    output.append(f"└{'─' * (width - 2)}┘")
+    return output
+
+
+def centered(lines):
+    width = terminal_width()
+    indent = " " * max(0, (shutil.get_terminal_size(fallback=(80, 24)).columns - width) // 2)
+    return "\n".join(indent + line for line in lines)
+
+
+def menu_status_lines():
+    present = device_exists()
+    mounted = is_mounted()
+    sharing = service_active()
+    return [
+        f"Storage  {'● present' if present else '○ missing'}   {'● mounted' if mounted else '○ safely unmounted'}",
+        f"Sharing  {'● online' if sharing else '○ offline'}   Public network share only",
+        f"Folders  Public shared   Private + Backups local-only",
+        f"Space    {disk_usage()}",
+    ]
+
+
+def render_menu(actions, selected=0):
+    width = terminal_width()
+    lines = [fit_text("NASBERRY  /  NETWORK STORAGE", width), fit_text(f"v{APP_VERSION}   Raspberry Pi storage console", width), ""]
+    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width))
+    lines.append("")
+    menu_lines = []
+    for index, (_, (label, _)) in enumerate(actions.items()):
+        marker = "▶" if index == selected else " "
+        menu_lines.append(f"{marker} {label}")
+    menu_lines.append("  Exit")
+    lines.extend(panel("ACTIONS", menu_lines, width, selected))
+    lines.append("")
+    lines.extend(textwrap.wrap("↑/↓ select  •  Enter open  •  1–8 shortcut  •  Q / Ctrl+C exit", width) or [""])
+    return centered(lines)
+
+
+def read_menu_key():
+    if not sys.stdin.isatty():
+        return input("\n  Select an action [1-9]: ").strip().lower()
+    descriptor = sys.stdin.fileno()
+    previous = termios.tcgetattr(descriptor)
+    try:
+        tty.setraw(descriptor)
+        key = sys.stdin.read(1)
+        if key == "\x1b":
+            key += sys.stdin.read(2)
+        return key.lower()
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+
+
+def show_action_feedback(label):
+    clear()
+    print(centered(panel("OPENING", [label, "Complete the prompts below, then return to the dashboard."])))
+    print()
+
+
+def show_menu_exit():
+    clear()
+    print(centered(panel("NASBERRY", ["Dashboard closed safely.", "No shutdown or unmount action was run."])))
+    print()
+
+
 def banner():
     print(f"\nNASBERRY NETWORK STORAGE SYSTEM v{APP_VERSION}\n")
 
@@ -827,17 +919,42 @@ def menu():
         "7": ("Setup / change drive", setup),
         "8": ("Repair Samba share", repair_samba_share),
     }
-    while state["running"]:
-        clear(); banner(); status(); print("\nMENU")
-        for key, (label, _) in actions.items(): print(f"  {key}) {label}")
-        print("  9) Exit")
-        choice = input("\nNAS > ").strip()
-        if choice == "9":
-            state["running"] = False
-        elif choice in actions:
-            actions[choice][1](); pause()
-        else:
-            log("Invalid option"); pause()
+    selected = 0
+    action_keys = list(actions)
+    clean_exit = False
+    try:
+        while state["running"]:
+            clear()
+            print(render_menu(actions, selected))
+            choice = read_menu_key()
+            if choice in {"q", "9", "\x03"}:
+                clean_exit = True
+                state["running"] = False
+            elif choice in {"\x1b[a", "k", "w"}:
+                selected = (selected - 1) % (len(actions) + 1)
+            elif choice in {"\x1b[b", "j", "s"}:
+                selected = (selected + 1) % (len(actions) + 1)
+            elif choice in {"\r", "\n"}:
+                if selected == len(actions):
+                    clean_exit = True
+                    state["running"] = False
+                else:
+                    label, action = actions[action_keys[selected]]
+                    show_action_feedback(label)
+                    action()
+                    pause()
+            elif choice in actions:
+                selected = action_keys.index(choice)
+                label, action = actions[choice]
+                show_action_feedback(label)
+                action()
+                pause()
+    except KeyboardInterrupt:
+        clean_exit = True
+        state["running"] = False
+    finally:
+        if clean_exit:
+            show_menu_exit()
 
 
 def parse_args():
