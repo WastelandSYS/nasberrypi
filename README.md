@@ -73,7 +73,7 @@ sudo nasberry
 ```
 
 <p align="center">
-<img width="641" height="461" alt="nasberrymainmenu" src="https://github.com/user-attachments/assets/3f1e3cc6-b02e-44e3-9148-8e3ed6964639" />
+<img width="640" height="461" alt="nasberrymainmenu" src="https://github.com/user-attachments/assets/74e40617-cf88-4431-9fa2-5849e8e8c2ff" />
 </p>
 
 ---
