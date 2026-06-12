@@ -70,9 +70,10 @@ class NasberryTests(unittest.TestCase):
         with mock.patch.object(nasberrypi, "DEVICE", "/dev/sda1"), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
             self.assertEqual(nasberrypi.storage_mount_options(), ["-o", "uid=1000,gid=1000,umask=0002"])
 
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "/mnt/nasberry/Public"))
     @mock.patch.object(nasberrypi, "run")
-    def test_configure_samba_validates_candidate_before_replacing_live_config(self, run, _valid):
+    def test_configure_samba_validates_candidate_before_replacing_live_config(self, run, _valid, _preflight):
         run.return_value.returncode = 0
         with tempfile.TemporaryDirectory() as directory:
             smb_file = Path(directory) / "smb.conf"
@@ -84,8 +85,9 @@ class NasberryTests(unittest.TestCase):
             self.assertTrue(list(Path(directory).glob("smb.conf.nasberry.*.bak")))
         self.assertEqual(run.call_args.args[0][:2], ["testparm", "-s"])
 
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "run")
-    def test_configure_samba_keeps_live_config_when_candidate_is_invalid(self, run):
+    def test_configure_samba_keeps_live_config_when_candidate_is_invalid(self, run, _preflight):
         run.return_value.returncode = 1
         run.return_value.stderr = "invalid"
         run.return_value.stdout = ""
@@ -167,6 +169,34 @@ class NasberryTests(unittest.TestCase):
             valid, detail = nasberrypi.samba_account_valid()
         self.assertFalse(valid)
         self.assertIn("disabled", detail)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    @mock.patch.object(nasberrypi, "command_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    def test_setup_preflight_rejects_device_without_uuid(self, _mounted, _command, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            device = Path(directory) / "device"
+            device.touch()
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.touch()
+            mount_point = Path(directory) / "mount"
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), mock.patch.object(nasberrypi, "MOUNT_POINT", str(mount_point)), mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=mock.Mock()):
+                self.assertFalse(nasberrypi.setup_preflight({"path": str(device), "uuid": ""}, "kali"))
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    @mock.patch.object(nasberrypi, "command_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    def test_setup_preflight_rejects_nonempty_unmounted_mount_point(self, _mounted, _command, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            device = Path(directory) / "device"
+            device.touch()
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.touch()
+            mount_point = Path(directory) / "mount"
+            mount_point.mkdir()
+            (mount_point / "unexpected-file").touch()
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), mock.patch.object(nasberrypi, "MOUNT_POINT", str(mount_point)), mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=mock.Mock()):
+                self.assertFalse(nasberrypi.setup_preflight({"path": str(device), "uuid": "uuid"}, "kali"))
 
     def test_panel_adapts_to_small_terminal_width(self):
         rendered = nasberrypi.panel("STATUS", ["A long status message that must wrap cleanly"], width=24)
@@ -296,11 +326,12 @@ class NasberryTests(unittest.TestCase):
 
     @mock.patch.object(nasberrypi, "restart_samba_service", return_value=True)
     @mock.patch.object(nasberrypi, "configure_samba_share", return_value=True)
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True)
     @mock.patch.object(nasberrypi, "mount_storage", return_value=True)
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_repair_samba_share_mounts_repairs_and_restarts(
-        self, _geteuid, mount_storage, ensure_layout, configure, restart
+        self, _geteuid, mount_storage, ensure_layout, _preflight, configure, restart
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
             self.assertTrue(nasberrypi.repair_samba_share())
