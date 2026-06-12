@@ -69,7 +69,7 @@ Each state is designed to provide visibility into the current status of your NAS
 ## Main Dashboard
 
 ```bash
-nasberry
+sudo nasberry
 ```
 
 <p align="center">
@@ -140,7 +140,7 @@ sudo ./install.sh
 Launch with:
 
 ```bash
-nasberry
+sudo nasberry
 ```
 
 ---
@@ -165,7 +165,7 @@ Attach a USB SSD, HDD, or flash drive to your Raspberry Pi.
 ### 2. Launch NasberryPi
 
 ```bash
-nasberry
+sudo nasberry
 ```
 
 ### 3. Run Storage Setup
@@ -207,7 +207,7 @@ smb://hostname
 Launch the dashboard:
 
 ```bash
-nasberry
+sudo nasberry
 ```
 
 Main management functions:
