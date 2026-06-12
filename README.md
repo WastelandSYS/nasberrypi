@@ -73,7 +73,7 @@ sudo nasberry
 ```
 
 <p align="center">
-[SCREENSHOT - MAIN DASHBOARD]
+<img width="641" height="461" alt="nasberrymainmenu" src="https://github.com/user-attachments/assets/3f1e3cc6-b02e-44e3-9148-8e3ed6964639" />
 </p>
 
 ---
