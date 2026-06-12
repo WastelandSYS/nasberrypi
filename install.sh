@@ -30,6 +30,11 @@ log "Installing Nasberry dependencies..."
 apt-get update
 apt-get install -y python3 samba cifs-utils util-linux iproute2
 
+for required_command in python3 smbd testparm smbpasswd pdbedit mount mountpoint lsblk ip; do
+    command -v "$required_command" >/dev/null || die "Required command '$required_command' is still missing after dependency installation."
+done
+python3 "$SCRIPT_DIR/nasberrypi.py" --version >/dev/null || die "nasberrypi.py failed its pre-installation version check."
+
 install -d -m 755 "$INSTALL_DIR" "$MOUNT_POINT"
 install -m 755 "$SCRIPT_DIR/nasberrypi.py" "$APP_PATH"
 install -m 755 "$SCRIPT_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
