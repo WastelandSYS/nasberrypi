@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -172,13 +173,61 @@ class NasberryTests(unittest.TestCase):
         self.assertTrue(all(len(line) == 24 for line in rendered))
         self.assertGreater(len(rendered), 3)
 
+    @mock.patch.object(nasberrypi, "menu_status_lines", return_value=["Storage ready"])
+    @mock.patch.object(nasberrypi, "terminal_width", return_value=60)
+    def test_menu_presentation_centers_branding_and_shows_shortcuts(self, _width, _status):
+        actions = {"1": ("Start sharing files", None), "2": ("Stop sharing files", None)}
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((60, 24))
+        )
+        with terminal, mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(actions)
+        lines = rendered.splitlines()
+        self.assertEqual(lines[0], "NASBERRY".center(60))
+        self.assertEqual(lines[1], f"VERSION {nasberrypi.APP_VERSION}".center(60))
+        self.assertIn("❯  1   Start sharing files", rendered)
+        self.assertIn("Q   Exit", rendered)
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    @mock.patch.object(nasberrypi, "device_mount_points", return_value=["/mnt/nasberry"])
+    def test_menu_mount_status_detects_configured_mount_point(self, _mounts, _mounted):
+        with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
+            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted", "/mnt/nasberry"))
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    @mock.patch.object(nasberrypi, "device_mount_points", return_value=["/media/user/storage"])
+    def test_menu_mount_status_reports_mount_outside_nas_mode(self, _mounts, _mounted):
+        with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
+            self.assertEqual(
+                nasberrypi.menu_mount_status(),
+                ("● mounted elsewhere", "/media/user/storage"),
+            )
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
+    @mock.patch.object(nasberrypi, "device_mount_points", return_value=[])
+    def test_menu_mount_status_marks_unmounted_path_as_configured(self, _mounts, _mounted):
+        with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
+            self.assertEqual(
+                nasberrypi.menu_mount_status(),
+                ("○ safely unmounted", "/mnt/nasberry (configured)"),
+            )
+
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mount_points", return_value=[])
+    def test_menu_mount_status_falls_back_when_device_detection_is_unavailable(self, _mounts, _mounted):
+        with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
+            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted", "/mnt/nasberry"))
+
     @mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free of 20 GB")
     @mock.patch.object(nasberrypi, "service_active", return_value=True)
-    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("● mounted", "/mnt/nasberry"))
     @mock.patch.object(nasberrypi, "device_exists", return_value=True)
-    def test_menu_status_keeps_private_and_backups_local_only(self, _device, _mounted, _sharing, _usage):
-        rendered = "\n".join(nasberrypi.menu_status_lines())
+    def test_menu_status_keeps_private_and_backups_local_only(self, _device, _mount, _sharing, _usage):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            rendered = "\n".join(nasberrypi.menu_status_lines())
         self.assertIn("Public network share only", rendered)
+        self.assertIn("Mount point  /mnt/nasberry", rendered)
+        self.assertIn("Share user   kali", rendered)
         self.assertIn("Private + Backups local-only", rendered)
 
     @mock.patch("builtins.print")
