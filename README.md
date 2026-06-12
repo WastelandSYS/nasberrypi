@@ -1,172 +1,284 @@
+<!-- ========================================================= -->
+
+<!--                        HERO IMAGE                         -->
+
+<!-- ========================================================= -->
+
 <img width="2000" height="700" alt="ChatGPT_Image_May_11_2026_02_06_05_AM" src="https://github.com/user-attachments/assets/ce0fc81a-6091-48d3-8147-b1f207bc3812" />
 
-# Nasberry
+# nasberrypi
 
-Nasberry turns a Raspberry Pi or Debian-based Linux computer and a formatted USB drive into a simple Samba network share. It includes guided drive detection, secure PIN-protected controls, diagnostics, and safe mount/unmount behavior.
+Simple Raspberry Pi NAS management system with guided storage setup, Samba sharing, safe-mode controls, and one-command network storage deployment.
 
-## Features
+Turn a Raspberry Pi and a USB storage device into a personal network-attached storage server with guided setup, simplified administration, and built-in recovery tools.
 
-- Automatically detects suitable formatted storage partitions and saves the selected drive by UUID.
-- Guided first-time setup that creates a secure hashed PIN and a Samba share.
-- Interactive menu for beginners and direct CLI commands for automation.
-- `doctor` diagnostics with clear fixes for missing drives, commands, services, and Samba configuration.
-- Displays Windows, macOS, and Linux connection addresses when sharing is online.
-- Opt-in safe mode; Nasberry no longer disables Samba services every time it starts.
+---
 
-## Requirements
+# FEATURES
 
-- Raspberry Pi OS, Debian, or Ubuntu with systemd.
-- A formatted USB storage drive. Nasberry does **not** format drives.
-- Root access for installation and setup.
+### Storage Management
 
-## Test a local checkout before publishing
+* Guided storage setup wizard
+* Automatic drive detection
+* Mount and unmount controls
+* Storage validation and status monitoring
+* Safe storage handling and recovery
 
-You do not need to push to GitHub or install Nasberry to test current local changes on the Raspberry Pi. From the checkout directory, run the source file directly with root privileges:
+### Network Sharing
 
-```bash
-sudo ./nasberrypi.py --version
-sudo ./nasberrypi.py setup
-sudo ./nasberrypi.py repair-samba
-sudo ./nasberrypi.py doctor
-```
+* Samba-based network file sharing
+* Automatic share configuration
+* Cross-platform device compatibility
+* Share status monitoring
+* Share user management
 
-Running `sudo nasberry ...` uses the separately installed copy in `/opt/nasberry`, which may be older than the checkout. Once the checkout works correctly, install that exact local version with `sudo ./install.sh`.
+### Safety & Recovery
 
-## Install and first-time setup
+* Panic Lock emergency shutdown
+* Safe Mode protection
+* Service validation checks
+* Samba repair utilities
+* Startup service management
 
-```bash
-sudo ./install.sh
-sudo nasberry setup
-```
+### Administration
 
-Setup detects available drives, asks which drive to use, creates a PIN and Samba password, stores configuration in `/etc/nasberry/config.ini`, creates `/mnt/nasberry/Public`, `/mnt/nasberry/Private`, and `/mnt/nasberry/Backups`, and configures Samba appliance mode so only `[Public]` is active.
+* Interactive terminal dashboard
+* Storage and share status reporting
+* Configuration management
+* Mount point visibility
+* Share user visibility
 
-> Setup preserves the previous Samba configuration in a timestamped `/etc/samba/smb.conf.nasberry.*.bak` file, then installs a minimal appliance configuration containing only `[Public]`. The candidate configuration is checked with `testparm` before it replaces the active configuration, and Samba restarts only after final validation passes.
+---
 
-Setup and `repair-samba` mount the selected SSD at the configured mount point before creating the storage layout. Only `Public` is exported over Samba; `Private` and `Backups` must remain local-only and must not be exposed over Samba. **ext4 is recommended** for best reliability and Linux permissions. exFAT and NTFS may work for basic sharing, but they cannot enforce Linux folder permissions as reliably. On POSIX filesystems, Nasberry sets `Public` to mode `0775` and protects `Private` and `Backups` with mode `0700`. FAT, exFAT, and NTFS drives receive owner mount options because those filesystems do not support independent Unix permissions for individual folders.
+# NASBERRY STATES
 
-## Terminal interface
+| State      | Purpose                                          |
+| ---------- | ------------------------------------------------ |
+| Offline    | Storage device not mounted                       |
+| Mounted    | Storage available locally                        |
+| Shared     | Network sharing active                           |
+| Safe Mode  | Sharing services disabled until manually started |
+| Panic Lock | Emergency shutdown of active shares              |
 
-Running `nasberry` without a command opens a responsive, keyboard-driven dashboard. Use the arrow keys (or `J`/`K`) to move, Enter to open an action, number keys as shortcuts, and `Q` to exit. The dashboard adapts to narrow terminals and keeps system status, actions, and navigation guidance visually separate.
+Each state is designed to provide visibility into the current status of your NAS while keeping storage management simple and predictable.
 
-Nasberry v0.2.6 remains the functional baseline for the interface. The tested hardware is Raspberry Pi OS with an exFAT SSD. Windows must see only `\\<pi-ip>\Public`; `Private` and `Backups` remain local-only. Interface work must not change storage layout, permissions, Samba behavior, PIN behavior, safe mode, setup/repair/doctor behavior, installer/uninstaller behavior, online/offline flow, or safe unmount behavior without explicit approval.
+---
 
-## Everyday use
+# SCREENSHOTS
 
-Run the beginner-friendly menu:
+## Main Dashboard
 
 ```bash
 nasberry
 ```
 
-Or use direct commands:
+<p align="center">
+[SCREENSHOT - MAIN DASHBOARD]
+</p>
+
+---
+
+## Storage Setup Wizard
+
+Configure storage devices, mount points, and NAS settings.
+
+<p align="center">
+[SCREENSHOT - STORAGE SETUP]
+</p>
+
+---
+
+## Mounted Storage
+
+View mounted device information and storage status.
+
+<p align="center">
+[SCREENSHOT - MOUNTED STORAGE]
+</p>
+
+---
+
+## Active File Sharing
+
+Network share running and accessible from other devices.
+
+<p align="center">
+[SCREENSHOT - ACTIVE SHARE]
+</p>
+
+---
+
+## Safe Mode
+
+Disable automatic sharing services for maintenance or troubleshooting.
+
+<p align="center">
+[SCREENSHOT - SAFE MODE]
+</p>
+
+---
+
+## Panic Lock
+
+Immediately stop sharing services and secure storage access.
+
+<p align="center">
+[SCREENSHOT - PANIC LOCK]
+</p>
+
+---
+
+# INSTALLATION
 
 ```bash
-nasberry status       # Show drive and sharing status
-nasberry online       # Mount the configured drive and start sharing
-nasberry offline      # Stop sharing and safely unmount
-nasberry mount        # Mount only
-nasberry unmount      # Safely unmount only
-nasberry lock         # Emergency stop and unmount
-nasberry doctor       # Diagnose common problems
-nasberry repair-samba # Recreate and validate the configured Samba share
+git clone https://github.com/WastelandSYS/nasberrypi.git
+cd nasberrypi
+chmod +x install.sh uninstall.sh
+sudo ./install.sh
 ```
 
-Starting or stopping normal file sharing requires the PIN created during setup. Emergency lock intentionally does not require the PIN.
+Launch with:
 
-## Connect from another device
+```bash
+nasberry
+```
 
-When the share starts, Nasberry prints connection addresses similar to:
+---
+
+# UNINSTALLATION
+
+```bash
+cd nasberrypi
+sudo ./uninstall.sh
+```
+
+The uninstaller removes the global `nasberry` shortcut and related application files. It does not remove your cloned repository folder.
+
+---
+
+# QUICK START
+
+### 1. Connect Storage
+
+Attach a USB SSD, HDD, or flash drive to your Raspberry Pi.
+
+### 2. Launch NasberryPi
+
+```bash
+nasberry
+```
+
+### 3. Run Storage Setup
+
+Use the setup wizard to configure your storage device and mount point.
+
+### 4. Configure Share Access
+
+Create or configure your Samba share user.
+
+### 5. Start File Sharing
+
+Enable network sharing through the dashboard.
+
+### 6. Connect From Another Device
+
+Windows:
 
 ```text
-Windows:     \\192.168.1.25\Public
-macOS/Linux: smb://192.168.1.25/Public
+\\hostname
 ```
 
-## Configuration
+Linux:
 
-The persistent configuration file is `/etc/nasberry/config.ini` when Nasberry runs as root. Environment variables such as `NASBERRY_DEVICE` and `NASBERRY_MOUNT_POINT` can temporarily override settings. The appliance share name is always `Public`.
+```text
+smb://hostname
+```
 
-Safe mode is opt-in because disabling Samba may affect unrelated shares. Run it explicitly with:
+macOS:
+
+```text
+smb://hostname
+```
+
+---
+
+# USAGE
+
+Launch the dashboard:
 
 ```bash
-sudo nasberry safe-mode --yes
+nasberry
 ```
 
-To apply it whenever Nasberry starts, set `safe_mode_on_start = true` in the config file.
+Main management functions:
 
-## Troubleshooting
+| Option           | Description                            |
+| ---------------- | -------------------------------------- |
+| Setup Storage    | Configure NAS storage device           |
+| Mount Storage    | Mount configured storage               |
+| Unmount Storage  | Safely unmount storage                 |
+| Start Share      | Enable network file sharing            |
+| Stop Share       | Disable network file sharing           |
+| Repair Samba     | Repair Samba configuration             |
+| Safe Mode        | Disable automatic sharing services     |
+| Panic Lock       | Immediate shutdown of sharing services |
+| Status Dashboard | View NAS health and status             |
 
-Start with:
+Help menu:
 
 ```bash
-sudo nasberry doctor
+nasberry -h
 ```
 
-If a drive is missing or changed, reconnect it and run `sudo nasberry setup`. If a drive will not unmount, close files and applications using it before trying again.
+---
 
-Nasberry intentionally does not edit `/etc/fstab` automatically. If you need a boot-managed mount, use the selected drive's UUID and review the entry carefully; an incorrect fstab entry can prevent normal boot.
+# COMPATIBILITY
 
-Nasberry setup installs a minimal Samba appliance configuration containing only an authenticated `[Public]` share. Before replacement, the previous Samba configuration is preserved in a timestamped backup. This prevents Windows from browsing `[homes]`, printer shares, the legacy mount-root share, or custom shares while Nasberry appliance mode is active. The Public share also disables symbolic-link traversal outside its folder.
+Designed primarily for Linux systems.
 
-```bash
-sudo nasberry repair-samba
-sudo testparm -s --section-name=Public --parameter-name=path
-sudo testparm -s
-```
+Tested on:
 
-The path command should print `/mnt/nasberry/Public`, and `sudo testparm -s` should list no share sections other than `[Public]`. Windows should connect directly to `\\<pi-ip>\Public` and cannot move above that share root. Windows may continue showing stale shares until it disconnects and reconnects.
+* Raspberry Pi OS
+* Kali Linux ARM
+* Raspberry Pi 4B
+* Raspberry Pi 5
 
-If setup changes the Samba password, Windows may keep using its previous cached SMB session. Close open NAS windows, run the following in Windows Command Prompt, then reconnect to `\\<pi-ip>\Public` with the new password:
+Supported storage:
 
-```bat
-net use * /delete /y
-```
+* USB SSD
+* USB HDD
+* USB Flash Drive
 
-`nasberry doctor` separately checks the Public-only Samba configuration, Public-folder ownership/write access, local-only `Private` and `Backups` protection, and whether the configured Samba account exists and is enabled. When storage is safely unmounted, doctor reports folder checks as not checked instead of incorrectly reporting them missing. On exFAT/FAT/NTFS, doctor explains that the local-only folders cannot have independent Unix modes.
+Supported clients:
 
-If setup says `[Public]` points to `/mnt/nasberry/Public`, but incorrectly expects `/mnt/nasberry`, the installed `sudo nasberry` command is older than the checkout. Test the checkout directly first; no GitHub push or pull is required:
+* Windows
+* Linux
+* macOS
+* Android
+* iOS
 
-```bash
-sudo ./nasberrypi.py --version
-sudo ./nasberrypi.py repair-samba
-sudo ./nasberrypi.py doctor
-```
+Notes:
 
-After the checkout works, `sudo ./install.sh` copies that exact local source into `/opt/nasberry` and updates the `nasberry` command.
+* Samba is installed automatically by the installer.
+* ext4 is the recommended filesystem for Linux-based NAS deployments.
+* Existing Samba installations are detected and preserved whenever possible.
+* Network share discovery behavior may vary by operating system.
 
-The repair command recreates and validates the Samba share without asking you to select the drive or replace your Nasberry PIN again.
+---
 
-## Uninstall
+# WHY NASBERRYPI?
 
-The uninstaller is conservative by default: it removes Nasberry's application files but preserves your storage data, mount point, configuration, Samba share, and installed system packages.
+NasberryPi was built to simplify self-hosted network storage.
 
-Preview the default uninstall without changing anything:
+Instead of manually configuring Samba, mount points, permissions, and services, NasberryPi provides a guided interface that transforms a Raspberry Pi and a storage device into a reliable personal NAS in minutes.
 
-```bash
-sudo ./uninstall.sh --dry-run
-```
+The project focuses on:
 
-Remove the Nasberry application while preserving configuration:
-
-```bash
-sudo ./uninstall.sh
-# Equivalent: sudo ./install.sh --uninstall
-```
-
-Also remove `/etc/nasberry` and only the Samba section marked as managed by Nasberry:
-
-```bash
-sudo ./uninstall.sh --purge
-```
-
-Optionally remove `/mnt/nasberry` only if it is unmounted and empty:
-
-```bash
-sudo ./uninstall.sh --purge --remove-mount-point
-```
-
-The uninstaller never deletes storage data, never automatically unmounts an active drive, never stops Samba globally, validates Samba after managed-share removal, and restores the previous Samba configuration if validation fails. It preserves installed packages because Samba and system utilities may be used by other applications.
+* simple deployment
+* safe storage handling
+* reliable file sharing
+* recovery and repair tools
+* lightweight terminal administration
 
 ---
 
