@@ -29,7 +29,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 DEFAULT_CONFIG_FILE = "/etc/nasberry/config.ini" if os.geteuid() == 0 else "~/.config/nasberry/config.ini"
 CONFIG_FILE = Path(os.path.expanduser(os.environ.get("NASBERRY_CONFIG_FILE", DEFAULT_CONFIG_FILE)))
 DEFAULTS = {
@@ -612,10 +612,11 @@ def samba_account_valid():
 
 
 def print_windows_credential_hint():
-    print("\nIf Windows previously connected with a different Samba password:")
-    print("  1. Open Command Prompt on Windows.")
-    print("  2. Run: net use * /delete /y")
-    print("  3. Reconnect to the Public share using the new Samba password.")
+    print("\nWindows connection help:")
+    print(r"  1. Connect directly to \\IP\Public (replace IP with this Nasberry's address).")
+    print("  2. If Windows cached an old Samba password, open Command Prompt and run:")
+    print("     net use * /delete /y")
+    print("  3. Reconnect to the Public share; stale shares may remain visible until Windows reconnects.")
 
 
 def doctor():
@@ -625,7 +626,7 @@ def doctor():
     results.append(check("Nasberry application", True, f"v{APP_VERSION} at {app_path}"))
     results.append(check("Configuration", CONFIG_FILE.exists(), str(CONFIG_FILE), "Run 'sudo nasberry setup'."))
     results.append(check("Privileges", os.geteuid() == 0 or command_exists("sudo"), "root/sudo available" if os.geteuid() == 0 or command_exists("sudo") else "sudo unavailable", "Run Nasberry as root."))
-    for command in ("mount", "umount", "lsblk", "systemctl", "testparm", "ip"):
+    for command in ("mount", "umount", "lsblk", "systemctl", "smbd", "testparm", "ip", "smbpasswd", "pdbedit"):
         results.append(check(f"Command {command}", command_exists(command), shutil.which(command) or "missing", "Re-run install.sh."))
     results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'."))
     results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}"))
@@ -662,9 +663,83 @@ def choose_device(non_interactive=False):
         return None
 
 
+def print_filesystem_guidance(filesystem):
+    filesystem = (filesystem or "unknown").lower()
+    print(f"\nSelected filesystem: {filesystem}")
+    print("  ext4 is recommended for best reliability and Linux permissions.")
+    if filesystem in {"exfat", "fat", "msdos", "ntfs", "ntfs3", "fuseblk", "vfat"}:
+        print("  exFAT/NTFS may work for basic sharing but cannot enforce Linux folder permissions as reliably.")
+    print("  Nasberry exports only Public over Samba; Private and Backups remain local-only.")
+
+
+def samba_config_preflight():
+    smb_file = Path("/etc/samba/smb.conf")
+    missing = [command for command in ("smbd", "testparm") if not command_exists(command)]
+    if missing:
+        log(f"✖ Required Samba tools are missing: {', '.join(missing)}. Re-run install.sh to install Samba.")
+        return False
+    if not smb_file.is_file():
+        log(f"✖ Samba configuration was not found at {smb_file}. Re-run install.sh to install Samba.")
+        return False
+    if not os.access(smb_file, os.R_OK | os.W_OK) or not os.access(smb_file.parent, os.W_OK):
+        log(f"✖ Samba configuration is not writable/backuppable: {smb_file}")
+        return False
+    return True
+
+
+def setup_preflight(selected, share_user):
+    failures = []
+    if os.geteuid() != 0:
+        failures.append("setup must run as root: sudo nasberry setup")
+    for command in ("smbd", "testparm", "mount", "lsblk", "ip", "smbpasswd", "pdbedit"):
+        if not command_exists(command):
+            failures.append(f"required command is missing: {command}")
+
+    device_path = selected.get("path") or selected.get("name") or ""
+    if not device_path or not os.path.exists(device_path):
+        failures.append(f"selected storage device does not exist: {device_path or 'unknown'}")
+    if not selected.get("uuid"):
+        failures.append(f"no UUID was found for selected storage device: {device_path or 'unknown'}")
+
+    mount_path = Path(MOUNT_POINT)
+    if mount_path.is_symlink() or (mount_path.exists() and not mount_path.is_dir()):
+        failures.append(f"mount point is unsafe (must be a real directory): {MOUNT_POINT}")
+    elif is_mounted():
+        selected_mounts = [os.path.realpath(point) for point in device_mount_points(device_path)]
+        if os.path.realpath(MOUNT_POINT) not in selected_mounts:
+            failures.append(f"mount point is already busy with another device: {MOUNT_POINT}")
+    elif mount_path.is_dir():
+        try:
+            if any(mount_path.iterdir()):
+                failures.append(f"unmounted mount point is not empty: {MOUNT_POINT}")
+        except OSError as exc:
+            failures.append(f"mount point cannot be inspected safely: {exc}")
+
+    try:
+        pwd.getpwnam(share_user)
+    except KeyError:
+        failures.append(f"Linux user does not exist: {share_user!r}")
+
+    smb_file = Path("/etc/samba/smb.conf")
+    if not smb_file.is_file():
+        failures.append(f"Samba configuration was not found: {smb_file}")
+    elif not os.access(smb_file, os.R_OK | os.W_OK) or not os.access(smb_file.parent, os.W_OK):
+        failures.append(f"Samba configuration is not writable/backuppable: {smb_file}")
+
+    if failures:
+        log("✖ Setup preflight failed before any configuration or storage changes:")
+        for failure in failures:
+            log(f"  - {failure}")
+        log("Re-run install.sh for missing Samba/tools, then run 'sudo nasberry doctor'.")
+        return False
+    log("✔ Setup preflight passed")
+    return True
+
+
 def restart_samba_service():
     if not service_exists(SAMBA_SERVICE):
-        return True
+        log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. On Raspberry Pi OS/Debian, install the samba package and run 'sudo nasberry doctor'.")
+        return False
     result = run(sudo_cmd("systemctl", "restart", SAMBA_SERVICE))
     if result.returncode != 0:
         log(f"✖ Samba restart failed: {result.stderr.strip()}")
@@ -678,6 +753,8 @@ def repair_samba_share():
         return False
     if not SHARE_USER:
         log("✖ No Samba user is configured. Run 'sudo nasberry setup' first.")
+        return False
+    if not samba_config_preflight():
         return False
     if not mount_storage(repair_permissions=True) or not ensure_storage_layout() or not configure_samba_share():
         log("✖ Samba repair failed. Review the validation error above.")
@@ -718,9 +795,10 @@ def appliance_samba_config():
 
 def configure_samba_share():
     smb_file = Path("/etc/samba/smb.conf")
-    if not smb_file.exists():
-        log("✖ /etc/samba/smb.conf was not found")
+    if not samba_config_preflight():
         return False
+    log("⚠ Nasberry will switch Samba into Public-only appliance mode.")
+    log("⚠ Existing custom Samba shares may be disabled; the old config will be backed up first.")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = smb_file.with_name(f"{smb_file.name}.nasberry.{timestamp}.bak")
     candidate = smb_file.with_name(f"{smb_file.name}.nasberry.candidate")
@@ -751,18 +829,18 @@ def setup(non_interactive=False, skip_pin=False):
     selected = choose_device(non_interactive)
     if not selected:
         return False
-    settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}" if selected.get("uuid") else selected.get("path")
-    settings["mount_point"] = MOUNT_POINT
-    settings["share_name"] = "Public"
     if not non_interactive:
         default_user = os.environ.get("SUDO_USER") or getpass.getuser()
         share_user = input(f"Linux user allowed to access the share [{default_user}]: ").strip() or default_user
-        try:
-            pwd.getpwnam(share_user)
-        except KeyError:
-            log(f"✖ Linux user {share_user!r} does not exist")
-            return False
-        settings["share_user"] = share_user
+    else:
+        share_user = settings.get("share_user")
+    print_filesystem_guidance(selected.get("fstype"))
+    if not setup_preflight(selected, share_user):
+        return False
+    settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}"
+    settings["mount_point"] = MOUNT_POINT
+    settings["share_name"] = "Public"
+    settings["share_user"] = share_user
     if not skip_pin:
         if non_interactive:
             log("✖ Non-interactive setup requires --skip-pin; run interactive setup afterward to set a PIN.")
@@ -780,10 +858,11 @@ def setup(non_interactive=False, skip_pin=False):
     if configured and settings.get("share_user") and not non_interactive and command_exists("smbpasswd"):
         log(f"Set the Samba network password for {settings['share_user']}:")
         password_result = subprocess.run(["smbpasswd", "-a", settings["share_user"]], check=False)
-        configured = password_result.returncode == 0
+        account_ok, account_detail = samba_account_valid() if password_result.returncode == 0 else (False, "smbpasswd failed")
+        configured = password_result.returncode == 0 and account_ok
         password_updated = configured
         if not configured:
-            log("✖ Samba password setup failed")
+            log(f"✖ Samba password/account setup failed: {account_detail}")
     if configured:
         configured = restart_samba_service()
     if configured:
