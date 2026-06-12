@@ -14,6 +14,10 @@ ASSUME_YES=false
 
 log() { printf '%s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
+require_command() { command -v "$1" >/dev/null || die "Required command '$1' was not found."; }
+safe_removal_path() {
+    case "$1" in ""|/|.) die "Refusing unsafe removal path: ${1:-<empty>}" ;; esac
+}
 usage() {
     cat <<'EOF'
 Usage: sudo ./uninstall.sh [options]
@@ -42,7 +46,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$EUID" -eq 0 ] || die "Run this uninstaller as root: sudo ./uninstall.sh"
-
+require_command mountpoint
+safe_removal_path "$INSTALL_DIR"
+safe_removal_path "$BIN_PATH"
+safe_removal_path "$CONFIG_DIR"
+safe_removal_path "$MOUNT_POINT"
 run_action() {
     if "$DRY_RUN"; then
         printf 'Would run:'
@@ -56,61 +64,73 @@ run_action() {
 remove_managed_share() {
     [ -f "$SMB_CONF" ] || { log "Samba config not found; skipping managed-share cleanup."; return 0; }
     local marker="# Managed by Nasberry: $SHARE_NAME"
-    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF"; then
+    local appliance_header="# Managed by Nasberry appliance mode. Previous config is saved before replacement."
+    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF" && ! grep -Fq "$appliance_header" "$SMB_CONF"; then
         log "No Nasberry-managed Samba settings found; leaving Samba configuration unchanged."
         return 0
     fi
     if "$DRY_RUN"; then
-        log "Would remove Nasberry-managed Samba settings from $SMB_CONF after validation."
+        log "Would remove Nasberry-managed Samba settings from $SMB_CONF after backup and validation."
         return 0
     fi
+    for required_command in python3 testparm install stat mktemp cp; do
+        require_command "$required_command"
+    done
 
     local backup temp
-    backup="${SMB_CONF}.nasberry-uninstall.$(date +%Y%m%d%H%M%S).bak"
-    temp="$(mktemp)"
+    backup="${SMB_CONF}.nasberry-uninstall.$(date +%Y%m%d%H%M%S%N).bak"
+    temp="$(mktemp "${SMB_CONF}.nasberry-uninstall.XXXXXX")"
     cp -a "$SMB_CONF" "$backup"
-    python3 - "$SMB_CONF" "$temp" "$marker" <<'PY'
+    python3 - "$SMB_CONF" "$temp" "$marker" "$appliance_header" "$SHARE_NAME" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 marker = sys.argv[3]
+appliance_header = sys.argv[4]
+share_header = f"[{sys.argv[5]}]".lower()
 lines = source.read_text().splitlines(keepends=True)
+current_appliance = any(line.strip() == appliance_header for line in lines)
 output = []
-skipping = False
+in_managed_block = False
+skip_section = False
 skip_disabled_setting = False
 for line in lines:
     stripped = line.strip()
-    if stripped == "# Nasberry appliance mode: disable share":
-        skip_disabled_setting = True
+    if stripped == "# BEGIN Managed by Nasberry appliance mode":
+        in_managed_block = True
+        continue
+    if stripped == "# END Managed by Nasberry appliance mode":
+        in_managed_block = False
+        continue
+    if in_managed_block:
         continue
     if skip_disabled_setting:
         skip_disabled_setting = False
         continue
-    if stripped == "# BEGIN Managed by Nasberry appliance mode":
-        skipping = True
+    if stripped == "# Nasberry appliance mode: disable share":
+        skip_disabled_setting = True
         continue
-    if stripped == "# END Managed by Nasberry appliance mode":
-        skipping = False
+    if stripped in {appliance_header, "# Managed by Nasberry appliance mode", "usershare max shares = 0"}:
         continue
-    if stripped in {"# Managed by Nasberry appliance mode", "usershare max shares = 0"}:
+    if stripped == marker or (current_appliance and stripped.lower() == share_header):
+        skip_section = True
         continue
-    if stripped == marker:
-        skipping = True
-        continue
-    if skipping and line.lstrip().startswith("["):
-        skipping = False
-    if not skipping:
-        output.append(line)
+    if skip_section:
+        if line.lstrip().startswith("["):
+            skip_section = False
+        else:
+            continue
+    output.append(line)
 destination.write_text("".join(output))
 PY
+    if ! testparm -s "$temp" >/dev/null 2>&1; then
+        rm -f "$temp"
+        die "Samba validation failed; live configuration was not changed. Backup: $backup"
+    fi
     install -m "$(stat -c '%a' "$SMB_CONF")" "$temp" "$SMB_CONF"
     rm -f "$temp"
-    if command -v testparm >/dev/null && ! testparm -s "$SMB_CONF" >/dev/null 2>&1; then
-        cp -a "$backup" "$SMB_CONF"
-        die "Samba validation failed; restored $backup"
-    fi
     log "Removed Nasberry-managed Samba share. Backup: $backup"
     if command -v systemctl >/dev/null && systemctl is-active --quiet smbd 2>/dev/null; then
         systemctl reload smbd || log "WARNING: Could not reload smbd; reload it manually."
