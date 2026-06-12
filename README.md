@@ -43,13 +43,13 @@ Setup detects available drives, asks which drive to use, creates a PIN and Samba
 
 > Setup preserves the previous Samba configuration in a timestamped `/etc/samba/smb.conf.nasberry.*.bak` file, then installs a minimal appliance configuration containing only `[Public]`. The candidate configuration is checked with `testparm` before it replaces the active configuration, and Samba restarts only after final validation passes.
 
-Setup and `repair-samba` mount the selected SSD at the configured mount point before creating the storage layout. Only `Public` is exported over Samba; `Private` and `Backups` remain local-only. On POSIX filesystems, Nasberry sets `Public` to mode `0775` and protects `Private` and `Backups` with mode `0700`. FAT, exFAT, and NTFS drives receive owner mount options because those filesystems do not support independent Unix permissions for individual folders.
+Setup and `repair-samba` mount the selected SSD at the configured mount point before creating the storage layout. Only `Public` is exported over Samba; `Private` and `Backups` must remain local-only and must not be exposed over Samba. **ext4 is recommended** for best reliability and Linux permissions. exFAT and NTFS may work for basic sharing, but they cannot enforce Linux folder permissions as reliably. On POSIX filesystems, Nasberry sets `Public` to mode `0775` and protects `Private` and `Backups` with mode `0700`. FAT, exFAT, and NTFS drives receive owner mount options because those filesystems do not support independent Unix permissions for individual folders.
 
 ## Terminal interface
 
 Running `nasberry` without a command opens a responsive, keyboard-driven dashboard. Use the arrow keys (or `J`/`K`) to move, Enter to open an action, number keys as shortcuts, and `Q` to exit. The dashboard adapts to narrow terminals and keeps system status, actions, and navigation guidance visually separate.
 
-Nasberry v0.2.5 remains the functional baseline for the interface. The tested hardware is Raspberry Pi OS with an exFAT SSD. Windows must see only `\\<pi-ip>\Public`; `Private` and `Backups` remain local-only. Interface work must not change storage layout, permissions, Samba behavior, PIN behavior, safe mode, setup/repair/doctor behavior, installer/uninstaller behavior, online/offline flow, or safe unmount behavior without explicit approval.
+Nasberry v0.2.6 remains the functional baseline for the interface. The tested hardware is Raspberry Pi OS with an exFAT SSD. Windows must see only `\\<pi-ip>\Public`; `Private` and `Backups` remain local-only. Interface work must not change storage layout, permissions, Samba behavior, PIN behavior, safe mode, setup/repair/doctor behavior, installer/uninstaller behavior, online/offline flow, or safe unmount behavior without explicit approval.
 
 ## Everyday use
 
@@ -105,6 +105,8 @@ sudo nasberry doctor
 
 If a drive is missing or changed, reconnect it and run `sudo nasberry setup`. If a drive will not unmount, close files and applications using it before trying again.
 
+Nasberry intentionally does not edit `/etc/fstab` automatically. If you need a boot-managed mount, use the selected drive's UUID and review the entry carefully; an incorrect fstab entry can prevent normal boot.
+
 Nasberry setup installs a minimal Samba appliance configuration containing only an authenticated `[Public]` share. Before replacement, the previous Samba configuration is preserved in a timestamped backup. This prevents Windows from browsing `[homes]`, printer shares, the legacy mount-root share, or custom shares while Nasberry appliance mode is active. The Public share also disables symbolic-link traversal outside its folder.
 
 ```bash
@@ -113,7 +115,7 @@ sudo testparm -s --section-name=Public --parameter-name=path
 sudo testparm -s
 ```
 
-The path command should print `/mnt/nasberry/Public`, and `sudo testparm -s` should list no share sections other than `[Public]`. Windows should connect to `\\<pi-ip>\Public` and cannot move above that share root.
+The path command should print `/mnt/nasberry/Public`, and `sudo testparm -s` should list no share sections other than `[Public]`. Windows should connect directly to `\\<pi-ip>\Public` and cannot move above that share root. Windows may continue showing stale shares until it disconnects and reconnects.
 
 If setup changes the Samba password, Windows may keep using its previous cached SMB session. Close open NAS windows, run the following in Windows Command Prompt, then reconnect to `\\<pi-ip>\Public` with the new password:
 
