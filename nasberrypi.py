@@ -804,24 +804,43 @@ def fit_text(text, width):
     return text if len(text) <= width else text[:max(1, width - 1)] + "…"
 
 
-def highlight(text):
-    if sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb" and "NO_COLOR" not in os.environ:
-        return f"\033[1;30;46m{text}\033[0m"
+def color_enabled():
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "dumb") != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def styled(text, *codes):
+    if color_enabled() and codes:
+        return f"\033[{';'.join(codes)}m{text}\033[0m"
     return text
 
 
-def panel(title, lines, width=None, selected=None):
+def highlight(text):
+    return styled(text, "1", "30", "46")
+
+
+def panel(title, lines, width=None, selected=None, accent="36"):
     width = width or terminal_width()
     inner = width - 4
     rule = "─" * (width - len(title) - 5)
-    output = [f"┌─ {title} {rule}┐"]
+    output = [styled(f"┌─ {title} {rule}┐", "1", accent)]
     for index, line in enumerate(lines):
         wrapped = textwrap.wrap(str(line), inner, break_long_words=True, break_on_hyphens=False) or [""]
         for part in wrapped:
             content = f" {fit_text(part, inner):<{inner}} "
-            output.append(f"│{highlight(content) if index == selected else content}│")
-    output.append(f"└{'─' * (width - 2)}┘")
+            left_edge = styled("│", accent)
+            right_edge = styled("│", accent)
+            output.append(f"{left_edge}{highlight(content) if index == selected else content}{right_edge}")
+    output.append(styled(f"└{'─' * (width - 2)}┘", "1", accent))
     return output
+
+
+def centered_line(text, width=None):
+    width = width or terminal_width()
+    return fit_text(text, width).center(width)
 
 
 def centered(lines):
@@ -830,31 +849,52 @@ def centered(lines):
     return "\n".join(indent + line for line in lines)
 
 
+def menu_mount_status():
+    detected = device_mount_points()
+    configured = os.path.realpath(MOUNT_POINT)
+    active = next((point for point in detected if os.path.realpath(point) == configured), None)
+    if active:
+        return "● mounted", active
+    if detected:
+        return "● mounted elsewhere", ", ".join(detected)
+    if is_mounted():
+        return "● mounted", MOUNT_POINT
+    return "○ safely unmounted", f"{MOUNT_POINT} (configured)"
+
+
 def menu_status_lines():
     present = device_exists()
-    mounted = is_mounted()
+    mount_state, mount_location = menu_mount_status()
     sharing = service_active()
     return [
-        f"Storage  {'● present' if present else '○ missing'}   {'● mounted' if mounted else '○ safely unmounted'}",
-        f"Sharing  {'● online' if sharing else '○ offline'}   Public network share only",
-        f"Folders  Public shared   Private + Backups local-only",
-        f"Space    {disk_usage()}",
+        f"Storage      {'● present' if present else '○ missing'}   {mount_state}",
+        f"Sharing      {'● online' if sharing else '○ offline'}   Public network share only",
+        f"Mount point  {mount_location}",
+        f"Share user   {SHARE_USER or 'not configured'}",
+        "Folders      Public shared   Private + Backups local-only",
+        f"Space        {disk_usage()}",
     ]
 
 
 def render_menu(actions, selected=0):
     width = terminal_width()
-    lines = [fit_text("NASBERRY  /  NETWORK STORAGE", width), fit_text(f"v{APP_VERSION}   Raspberry Pi storage console", width), ""]
-    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width))
+    lines = [
+        styled(centered_line("NASBERRY", width), "1", "36"),
+        styled(centered_line(f"VERSION {APP_VERSION}", width), "1", "35"),
+        styled(centered_line("◆  NETWORK STORAGE CONSOLE  ◆", width), "2", "37"),
+        "",
+    ]
+    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width, accent="34"))
     lines.append("")
     menu_lines = []
-    for index, (_, (label, _)) in enumerate(actions.items()):
-        marker = "▶" if index == selected else " "
-        menu_lines.append(f"{marker} {label}")
-    menu_lines.append("  Exit")
-    lines.extend(panel("ACTIONS", menu_lines, width, selected))
+    for index, (shortcut, (label, _)) in enumerate(actions.items()):
+        marker = "❯" if index == selected else " "
+        menu_lines.append(f"{marker}  {shortcut}   {label}")
+    menu_lines.append("   Q   Exit")
+    lines.extend(panel("MAIN MENU", menu_lines, width, selected, accent="36"))
     lines.append("")
-    lines.extend(textwrap.wrap("↑/↓ select  •  Enter open  •  1–8 shortcut  •  Q / Ctrl+C exit", width) or [""])
+    help_text = "↑/↓ Navigate  •  Enter Select  •  1–8 Shortcut  •  Q Exit"
+    lines.append(styled(centered_line(help_text, width), "2", "37"))
     return centered(lines)
 
 
