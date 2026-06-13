@@ -4,11 +4,20 @@ set -euo pipefail
 INSTALL_DIR="/opt/nasberry"
 APP_PATH="$INSTALL_DIR/nasberrypi.py"
 BIN_PATH="/usr/local/bin/nasberry"
+SYSTEM_BIN_PATH="/usr/bin/nasberry"
 MOUNT_POINT="${NASBERRY_MOUNT_POINT:-/mnt/nasberry}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '%s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
+install_command_link() {
+    local link_path="$1"
+    if [ -e "$link_path" ] || [ -L "$link_path" ]; then
+        [ -L "$link_path" ] && [ "$(readlink -f "$link_path")" = "$APP_PATH" ] ||
+            die "Refusing to replace existing command: $link_path"
+    fi
+    ln -sfn "$APP_PATH" "$link_path"
+}
 
 [ "$EUID" -eq 0 ] || die "Run this installer as root: sudo ./install.sh"
 
@@ -38,13 +47,17 @@ python3 "$SCRIPT_DIR/nasberrypi.py" --version >/dev/null || die "nasberrypi.py f
 install -d -m 755 "$INSTALL_DIR" "$MOUNT_POINT"
 install -m 755 "$SCRIPT_DIR/nasberrypi.py" "$APP_PATH"
 install -m 755 "$SCRIPT_DIR/uninstall.sh" "$INSTALL_DIR/uninstall.sh"
-ln -sf "$APP_PATH" "$BIN_PATH"
+install_command_link "$BIN_PATH"
+# sudo's secure_path commonly omits /usr/local/bin, including on some Kali
+# installations. Keep the conventional link and add a /usr/bin compatibility link.
+install_command_link "$SYSTEM_BIN_PATH"
 hash -r
 
 log ""
 log "Nasberry installation complete."
 log "  Application: $APP_PATH"
 log "  Command:     $BIN_PATH"
+log "  Sudo command compatibility: $SYSTEM_BIN_PATH"
 log "  Mount point: $MOUNT_POINT"
 log "  Version:     $("$BIN_PATH" --version)"
 log "  Source:      $SCRIPT_DIR"
