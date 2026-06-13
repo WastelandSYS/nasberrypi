@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_DIR="${NASBERRY_INSTALL_DIR:-/opt/nasberry}"
 BIN_PATH="${NASBERRY_BIN_PATH:-/usr/local/bin/nasberry}"
+SYSTEM_BIN_PATH="${NASBERRY_SYSTEM_BIN_PATH:-/usr/bin/nasberry}"
 CONFIG_DIR="${NASBERRY_CONFIG_DIR:-/etc/nasberry}"
 SMB_CONF="${NASBERRY_SMB_CONF:-/etc/samba/smb.conf}"
 MOUNT_POINT="${NASBERRY_MOUNT_POINT:-/mnt/nasberry}"
@@ -49,6 +50,7 @@ done
 require_command mountpoint
 safe_removal_path "$INSTALL_DIR"
 safe_removal_path "$BIN_PATH"
+safe_removal_path "$SYSTEM_BIN_PATH"
 safe_removal_path "$CONFIG_DIR"
 safe_removal_path "$MOUNT_POINT"
 run_action() {
@@ -138,7 +140,7 @@ PY
 }
 
 log "Nasberry uninstall plan:"
-log "  Remove application: $INSTALL_DIR and $BIN_PATH"
+log "  Remove application: $INSTALL_DIR, $BIN_PATH, and $SYSTEM_BIN_PATH"
 log "  Purge configuration and managed Samba share: $PURGE"
 log "  Remove empty, unmounted mount point: $REMOVE_MOUNT_POINT"
 log "  Storage data will never be deleted."
@@ -162,6 +164,11 @@ else
 fi
 
 run_action rm -f -- "$BIN_PATH"
+# Only remove the compatibility path when it is Nasberry's link, so an older
+# installation cannot accidentally remove an unrelated /usr/bin command.
+if [ -L "$SYSTEM_BIN_PATH" ] && [ "$(readlink "$SYSTEM_BIN_PATH")" = "$INSTALL_DIR/nasberrypi.py" ]; then
+    run_action rm -f -- "$SYSTEM_BIN_PATH"
+fi
 run_action rm -rf -- "$INSTALL_DIR"
 
 if "$REMOVE_MOUNT_POINT"; then
