@@ -4,7 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-mkdir -p "$TMP/bin" "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/etc/nasberry" "$TMP/etc/samba" "$TMP/mnt/nasberry"
+mkdir -p "$TMP/bin" "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/usr/bin" "$TMP/etc/nasberry" "$TMP/etc/samba" "$TMP/mnt/nasberry"
 cat > "$TMP/bin/testparm" <<'EOF'
 #!/bin/sh
 [ "${TESTPARM_FAIL:-0}" != 1 ]
@@ -12,6 +12,7 @@ EOF
 chmod +x "$TMP/bin/testparm"
 printf 'app\n' > "$TMP/opt/nasberry/nasberrypi.py"
 ln -s "$TMP/opt/nasberry/nasberrypi.py" "$TMP/usr/local/bin/nasberry"
+ln -s "$TMP/opt/nasberry/nasberrypi.py" "$TMP/usr/bin/nasberry"
 printf 'config\n' > "$TMP/etc/nasberry/config.ini"
 cat > "$TMP/etc/samba/smb.conf" <<'EOF'
 [global]
@@ -37,6 +38,7 @@ run_uninstall() {
         PATH="$TMP/bin:$PATH" \
         NASBERRY_INSTALL_DIR="$TMP/opt/nasberry" \
         NASBERRY_BIN_PATH="$TMP/usr/local/bin/nasberry" \
+        NASBERRY_SYSTEM_BIN_PATH="$TMP/usr/bin/nasberry" \
         NASBERRY_CONFIG_DIR="$TMP/etc/nasberry" \
         NASBERRY_SMB_CONF="$TMP/etc/samba/smb.conf" \
         NASBERRY_MOUNT_POINT="$TMP/mnt/nasberry" \
@@ -46,6 +48,7 @@ run_uninstall() {
 run_uninstall --yes
 [ ! -e "$TMP/opt/nasberry" ]
 [ ! -e "$TMP/usr/local/bin/nasberry" ]
+[ ! -e "$TMP/usr/bin/nasberry" ]
 [ -f "$TMP/etc/nasberry/config.ini" ]
 grep -Fq '[Public]' "$TMP/etc/samba/smb.conf"
 
