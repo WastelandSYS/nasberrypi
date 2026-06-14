@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import termios
+import tempfile
 import textwrap
 import tty
 import time
@@ -45,11 +46,21 @@ DEFAULTS = {
     "pin_hash": "",
 }
 
+def load_config(path):
+    loaded = configparser.ConfigParser(interpolation=None)
+    loaded["nasberry"] = DEFAULTS.copy()
+    try:
+        with path.open() as handle:
+            loaded.read_file(handle)
+    except FileNotFoundError:
+        pass
+    except (OSError, configparser.Error) as exc:
+        print(f"WARNING: Could not read configuration {path}: {exc}", file=sys.stderr)
+    return loaded
+
+
 state = {"running": True}
-config = configparser.ConfigParser()
-config["nasberry"] = DEFAULTS.copy()
-if CONFIG_FILE.exists():
-    config.read(CONFIG_FILE)
+config = load_config(CONFIG_FILE)
 settings = config["nasberry"]
 
 
@@ -107,11 +118,18 @@ def pause():
 
 def save_config():
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = CONFIG_FILE.with_suffix(".tmp")
-    with temp.open("w") as handle:
-        config.write(handle)
-    os.chmod(temp, 0o600)
-    temp.replace(CONFIG_FILE)
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{CONFIG_FILE.name}.", dir=CONFIG_FILE.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            config.write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, 0o600)
+        temp.replace(CONFIG_FILE)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def lsblk_devices():
@@ -687,6 +705,13 @@ def samba_config_preflight():
     return True
 
 
+def valid_share_user(share_user):
+    return bool(share_user) and not any(
+        character.isspace() or character in "[]#;=,"
+        for character in share_user
+    )
+
+
 def setup_preflight(selected, share_user):
     failures = []
     if os.geteuid() != 0:
@@ -715,9 +740,11 @@ def setup_preflight(selected, share_user):
         except OSError as exc:
             failures.append(f"mount point cannot be inspected safely: {exc}")
 
+    if not valid_share_user(share_user):
+        failures.append(f"Linux user is unsafe for Samba configuration: {share_user!r}")
     try:
         pwd.getpwnam(share_user)
-    except KeyError:
+    except (KeyError, TypeError):
         failures.append(f"Linux user does not exist: {share_user!r}")
 
     smb_file = Path("/etc/samba/smb.conf")
@@ -753,6 +780,9 @@ def repair_samba_share():
         return False
     if not SHARE_USER:
         log("✖ No Samba user is configured. Run 'sudo nasberry setup' first.")
+        return False
+    if not valid_share_user(SHARE_USER):
+        log("✖ Configured Samba user contains unsupported characters. Run 'sudo nasberry setup' again.")
         return False
     if not samba_config_preflight():
         return False
@@ -795,23 +825,33 @@ def appliance_samba_config():
 
 def configure_samba_share():
     smb_file = Path("/etc/samba/smb.conf")
+    if not valid_share_user(SHARE_USER):
+        log("✖ Refusing to create Samba configuration with an unsafe share user")
+        return False
     if not samba_config_preflight():
         return False
     log("⚠ Nasberry will switch Samba into Public-only appliance mode.")
     log("⚠ Existing custom Samba shares may be disabled; the old config will be backed up first.")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = smb_file.with_name(f"{smb_file.name}.nasberry.{timestamp}.bak")
-    candidate = smb_file.with_name(f"{smb_file.name}.nasberry.candidate")
     shutil.copy2(smb_file, backup)
     log(f"Preserved previous Samba configuration at {backup}")
-    candidate.write_text(appliance_samba_config())
-    syntax = run(["testparm", "-s", str(candidate)])
-    if syntax.returncode != 0:
+    descriptor, candidate_name = tempfile.mkstemp(prefix=f".{smb_file.name}.nasberry.", dir=smb_file.parent)
+    candidate = Path(candidate_name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(appliance_samba_config())
+            handle.flush()
+            os.fsync(handle.fileno())
+        shutil.copymode(smb_file, candidate)
+        syntax = run(["testparm", "-s", str(candidate)])
+        if syntax.returncode != 0:
+            detail = syntax.stderr.strip() or syntax.stdout.strip() or "testparm rejected the candidate configuration"
+            log(f"✖ Samba config validation failed: {detail}")
+            return False
+        os.replace(candidate, smb_file)
+    finally:
         candidate.unlink(missing_ok=True)
-        detail = syntax.stderr.strip() or syntax.stdout.strip() or "testparm rejected the candidate configuration"
-        log(f"✖ Samba config validation failed: {detail}")
-        return False
-    os.replace(candidate, smb_file)
     valid, reason = samba_config_valid()
     if valid:
         log("✔ Samba configured with only [Public] active")
