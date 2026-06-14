@@ -222,6 +222,21 @@ def active_mount_point():
 
     return mounts[0]
 
+def storage_mount_state():
+    mount_point = active_mount_point()
+    if not mount_point:
+        return "safely_unmounted"
+    if os.path.realpath(mount_point) == os.path.realpath(MOUNT_POINT):
+        return "mounted_nas"
+    return "mounted_elsewhere"
+
+def storage_mount_state_label():
+    return {
+        "safely_unmounted": "safely unmounted",
+        "mounted_nas": "mounted in NAS mode",
+        "mounted_elsewhere": "mounted elsewhere",
+    }[storage_mount_state()]
+
 def ensure_mount_point():
     try:
         Path(MOUNT_POINT).mkdir(parents=True, exist_ok=True)
@@ -235,10 +250,17 @@ def device_exists():
     return os.path.exists(DEVICE)
 
 
-def cleanup_other_mounts():
+def cleanup_other_mounts(confirm=True):
     mounts = [point for point in device_mount_points() if os.path.realpath(point) != os.path.realpath(MOUNT_POINT)]
+    if mounts and confirm:
+        log("⚠ Storage is mounted outside the Nasberry mount point.")
+        log(f"Current mount point : {', '.join(mounts)}")
+        log(f"Nasberry mount point: {MOUNT_POINT}")
+        if input("Move it into NAS mode? [y/N]: ").strip().lower() not in {"y", "yes"}:
+            log("Mount cancelled; storage remains mounted elsewhere")
+            return False
     for point in mounts:
-        log(f"Detected storage mounted at {point}; moving it into NAS mode...")
+        log(f"Moving storage from {point} into NAS mode...")
         result = run(sudo_cmd("umount", point))
         if result.returncode != 0:
             log(f"✖ Could not unmount {point}: {result.stderr.strip() or 'device may be busy'}")
@@ -247,8 +269,8 @@ def cleanup_other_mounts():
 
 
 def mount_storage(repair_permissions=False):
-    if not ensure_mount_point() or not cleanup_other_mounts():
-        write_state(False, service_active())
+    if not ensure_mount_point() or not cleanup_other_mounts(confirm=not repair_permissions):
+        write_state(is_mounted(), service_active())
         return False
     options = storage_mount_options()
     if is_mounted() and repair_permissions and options:
@@ -260,7 +282,7 @@ def mount_storage(repair_permissions=False):
             log(f"✖ Could not remount storage: {result.stderr.strip() or 'device may be busy'}")
             return False
     if is_mounted():
-        log("✔ Storage is already mounted")
+        log("✔ Storage is already mounted in NAS mode")
         write_state(True, service_active())
         return True
     if not device_exists():
@@ -274,7 +296,7 @@ def mount_storage(repair_permissions=False):
     time.sleep(CHECK_DELAY)
     mounted = result.returncode == 0 and is_mounted()
     if mounted:
-        log(f"✔ Storage mounted at {MOUNT_POINT}")
+        log(f"✔ Storage mounted in NAS mode at {MOUNT_POINT}")
     else:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown mount error"
         log(f"✖ Mount failed: {detail}")
@@ -521,10 +543,14 @@ def panic_lock():
 
 
 def write_state(mounted, shared):
+    mount_state = storage_mount_state()
+    active = active_mount_point()
     try:
         Path(STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
         Path(STATE_FILE).write_text(
-            f"MOUNTED={int(mounted)}\nSHARED={int(shared)}\nDEVICE={DEVICE}\nMOUNT_POINT={MOUNT_POINT}\nUPDATED_AT={datetime.now().isoformat(timespec='seconds')}\n"
+            f"MOUNTED={int(mounted)}\nSHARED={int(shared)}\nDEVICE={DEVICE}\nMOUNT_POINT={MOUNT_POINT}\n"
+            f"MOUNT_STATE={mount_state}\nACTIVE_MOUNT_POINT={active}\nNAS_MOUNT_POINT={MOUNT_POINT}\n"
+            f"UPDATED_AT={datetime.now().isoformat(timespec='seconds')}\n"
         )
     except OSError as exc:
         log(f"⚠ Could not write state file: {exc}")
@@ -681,6 +707,14 @@ def doctor():
         results.append(check(f"Command {command}", command_exists(command), shutil.which(command) or "missing", "Re-run install.sh."))
     results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'."))
     results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}"))
+    mount_state = storage_mount_state()
+    active = active_mount_point()
+    mount_details = {
+        "safely_unmounted": "safely unmounted",
+        "mounted_nas": f"mounted in NAS mode at {active}",
+        "mounted_elsewhere": f"mounted elsewhere at {active}; configured Nasberry mount point: {MOUNT_POINT}",
+    }
+    results.append(check("Storage mount state", True, mount_details[mount_state]))
     results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup."))
     valid, reason = samba_config_valid()
     results.append(check("Samba share", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it."))
@@ -1006,11 +1040,11 @@ def menu_mount_status():
     configured = os.path.realpath(MOUNT_POINT)
     active = next((point for point in detected if os.path.realpath(point) == configured), None)
     if active:
-        return "● mounted", active
+        return "● mounted in NAS mode", active
     if detected:
         return "● mounted elsewhere", ", ".join(detected)
     if is_mounted():
-        return "● mounted", MOUNT_POINT
+        return "● mounted in NAS mode", MOUNT_POINT
     return "○ safely unmounted", f"{MOUNT_POINT} (configured)"
 
 
@@ -1020,7 +1054,7 @@ def menu_status_lines():
     sharing = service_active()
     return [
         f"Storage      {'● present' if present else '○ missing'}   {mount_state}",
-        f"Sharing      {'● online' if sharing else '○ offline'}   Public network share only",
+        f"Sharing      {'● sharing online' if sharing else '○ sharing offline'}   Public network share only",
         f"Mount point  {mount_location}",
         f"Share user   {SHARE_USER or 'not configured'}",
         "Folders      Public shared   Private + Backups local-only",
@@ -1084,14 +1118,24 @@ def banner():
 def status():
     print(f"Storage device : {DEVICE} ({'present' if device_exists() else 'missing'})")
     mount_point = active_mount_point()
-    print(f"Storage mounted: {'yes' if mount_point else 'no'}")
-    print(f"File sharing   : {'online' if service_active() else 'offline'}")
+    print(f"Mount state    : {storage_mount_state_label()}")
+    print(f"File sharing   : {'sharing online' if service_active() else 'sharing offline'}")
     print(f"Disk space     : {disk_usage()}")
     print(f"Mount point    : {mount_point or MOUNT_POINT}")
     print(f"Share name     : {SHARE_NAME}")
     print(f"Share user     : {SHARE_USER or 'not configured'}")
     if service_active():
         print_connection_info()
+
+def storage_info():
+    active = active_mount_point()
+    print(f"Storage device      : {DEVICE}")
+    print(f"Device              : {'present' if device_exists() else 'missing'}")
+    print(f"Filesystem          : {storage_filesystem() or 'unknown'}")
+    print(f"Mount state         : {storage_mount_state_label()}")
+    print(f"Active mount point  : {active or '-'}")
+    print(f"Nasberry mount point: {MOUNT_POINT}")
+    print(f"Disk space          : {disk_usage()}")
 
 
 def protected(action):
@@ -1155,6 +1199,7 @@ def parse_args():
     parser.add_argument("--version", action="version", version=f"Nasberry {APP_VERSION}")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="show NAS status")
+    sub.add_parser("storage", help="show storage status")
     sub.add_parser("online", help="mount storage and start sharing")
     sub.add_parser("offline", help="stop sharing and safely unmount")
     sub.add_parser("mount", help="mount storage")
@@ -1175,7 +1220,7 @@ def main():
     if SAFE_MODE_ON_START:
         enforce_boot_safety()
     commands = {
-        "status": lambda: (status() or True), "online": lambda: protected(start_share),
+        "status": lambda: (status() or True), "storage": lambda: (storage_info() or True), "online": lambda: protected(start_share),
         "offline": lambda: protected(lambda: stop_share() and unmount_storage()), "mount": mount_storage,
         "unmount": unmount_storage, "lock": panic_lock, "doctor": doctor, "repair-samba": repair_samba_share,
     }
