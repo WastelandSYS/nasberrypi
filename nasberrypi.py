@@ -211,6 +211,16 @@ def storage_mount_options():
 def is_mounted():
     return os.path.ismount(MOUNT_POINT)
 
+def active_mount_point():
+    mounts = device_mount_points()
+    if not mounts:
+        return ""
+
+    for point in mounts:
+        if os.path.realpath(point) == os.path.realpath(MOUNT_POINT):
+            return point
+
+    return mounts[0]
 
 def ensure_mount_point():
     try:
@@ -303,22 +313,42 @@ def enforce_boot_safety():
 
 
 def unmount_storage():
-    if not is_mounted():
+    mount_point = active_mount_point()
+
+    if not mount_point:
         log("✔ Storage is already unmounted")
         write_state(False, service_active())
         return True
+
+    mounted_elsewhere = os.path.realpath(mount_point) != os.path.realpath(MOUNT_POINT)
+
+    if mounted_elsewhere:
+        log("⚠ Storage is mounted outside the Nasberry mount point")
+        log(f"Current mount point : {mount_point}")
+        log(f"Nasberry mount point: {MOUNT_POINT}")
+        answer = input("Unmount this drive anyway? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            log("Unmount cancelled")
+            write_state(True, service_active())
+            return False
+
     if service_active() and not stop_share():
         log("✖ Refusing to unmount while the share is still active")
         return False
-    log("Safely unmounting storage...")
-    result = run(sudo_cmd("umount", MOUNT_POINT))
+
+    log(f"Safely unmounting storage from {mount_point}...")
+    result = run(sudo_cmd("umount", mount_point))
     time.sleep(CHECK_DELAY)
-    unmounted = result.returncode == 0 and not is_mounted()
+
+    still_mounted = bool(device_mount_points())
+    unmounted = result.returncode == 0 and not still_mounted
+
     if unmounted:
         log("✔ Storage safely unmounted")
     else:
         log(f"✖ Unmount failed: {result.stderr.strip() or 'device may be busy'}")
-    write_state(is_mounted(), service_active())
+
+    write_state(still_mounted, service_active())
     return unmounted
 
 
@@ -501,10 +531,13 @@ def write_state(mounted, shared):
 
 
 def disk_usage():
-    if not is_mounted():
+    mount_point = active_mount_point()
+
+    if not mount_point:
         return "Not mounted"
+
     try:
-        usage = shutil.disk_usage(MOUNT_POINT)
+        usage = shutil.disk_usage(mount_point)
         return f"{usage.free / (1024 ** 3):.1f}G free / {usage.total / (1024 ** 3):.1f}G"
     except OSError:
         return "Unavailable"
@@ -1050,10 +1083,11 @@ def banner():
 
 def status():
     print(f"Storage device : {DEVICE} ({'present' if device_exists() else 'missing'})")
-    print(f"Storage mounted: {'yes' if is_mounted() else 'no'}")
+    mount_point = active_mount_point()
+    print(f"Storage mounted: {'yes' if mount_point else 'no'}")
     print(f"File sharing   : {'online' if service_active() else 'offline'}")
     print(f"Disk space     : {disk_usage()}")
-    print(f"Mount point    : {MOUNT_POINT}")
+    print(f"Mount point    : {mount_point or MOUNT_POINT}")
     print(f"Share name     : {SHARE_NAME}")
     print(f"Share user     : {SHARE_USER or 'not configured'}")
     if service_active():
