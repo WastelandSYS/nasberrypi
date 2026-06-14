@@ -143,6 +143,8 @@ Launch with:
 sudo nasberry
 ```
 
+Nasberry currently supports Debian-family systems that provide `apt-get`, including Raspberry Pi OS, Debian, Ubuntu, and Kali Linux.
+
 ---
 
 # UNINSTALLATION
@@ -153,6 +155,14 @@ sudo ./uninstall.sh
 ```
 
 The uninstaller removes the global `nasberry` shortcut and related application files. It does not remove your cloned repository folder.
+
+Preview an uninstall without changing the system:
+
+```bash
+sudo ./uninstall.sh --dry-run
+```
+
+Use `--purge` to also remove Nasberry's configuration and managed Samba settings. Storage data is never deleted. Run `sudo ./uninstall.sh --help` for all options.
 
 ---
 
@@ -261,8 +271,40 @@ Notes:
 
 * Samba is installed automatically by the installer.
 * ext4 is the recommended filesystem for Linux-based NAS deployments.
-* Existing Samba installations are detected and preserved whenever possible.
+* Setup switches Samba into Public-only appliance mode. The previous `/etc/samba/smb.conf` is backed up first, but existing custom shares may be disabled.
 * Network share discovery behavior may vary by operating system.
+
+---
+
+# RECOVERY
+
+Nasberry validates a candidate Samba configuration before replacing the live configuration and saves the previous configuration as `/etc/samba/smb.conf.nasberry.<timestamp>.bak`.
+
+To inspect available backups:
+
+```bash
+sudo ls -1 /etc/samba/smb.conf.nasberry.*.bak
+```
+
+Before restoring a backup, validate it with `testparm`. Take Nasberry offline first, copy the selected backup to `/etc/samba/smb.conf`, validate the restored file, and restart Samba:
+
+```bash
+sudo nasberry offline
+sudo testparm -s /etc/samba/smb.conf.nasberry.<timestamp>.bak
+sudo cp /etc/samba/smb.conf.nasberry.<timestamp>.bak /etc/samba/smb.conf
+sudo testparm -s /etc/samba/smb.conf
+sudo systemctl restart smbd
+```
+
+Nasberry's configuration is stored at `/etc/nasberry/config.ini`. Run `sudo nasberry doctor` for diagnostics or `sudo nasberry repair-samba` to recreate and validate the managed Public share.
+
+---
+
+# SECURITY
+
+The Nasberry PIN protects selected actions within Nasberry. It does not replace Linux account security, Samba passwords, SSH security, disk encryption, or physical security.
+
+Nasberry performs privileged storage and Samba administration. Review release notes before upgrading, keep backups of important data, and test storage-related changes with a disposable drive first.
 
 ---
 
@@ -284,7 +326,7 @@ The project focuses on:
 
 # LICENSE
 
-Systempi is released under the GNU General Public License v3.0. See [`LICENSE`](LICENSE) for the full license text.
+NasberryPi is released under the GNU General Public License v3.0. See [`LICENSE`](LICENSE) for the full license text.
 
 ---
 
