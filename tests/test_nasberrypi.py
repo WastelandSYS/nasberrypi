@@ -248,7 +248,7 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "device_mount_points", return_value=["/mnt/nasberry"])
     def test_menu_mount_status_detects_configured_mount_point(self, _mounts, _mounted):
         with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
-            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted", "/mnt/nasberry"))
+            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted in NAS mode", "/mnt/nasberry"))
 
     @mock.patch.object(nasberrypi, "is_mounted", return_value=False)
     @mock.patch.object(nasberrypi, "device_mount_points", return_value=["/media/user/storage"])
@@ -272,11 +272,11 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "device_mount_points", return_value=[])
     def test_menu_mount_status_falls_back_when_device_detection_is_unavailable(self, _mounts, _mounted):
         with mock.patch.object(nasberrypi, "MOUNT_POINT", "/mnt/nasberry"):
-            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted", "/mnt/nasberry"))
+            self.assertEqual(nasberrypi.menu_mount_status(), ("● mounted in NAS mode", "/mnt/nasberry"))
 
     @mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free of 20 GB")
     @mock.patch.object(nasberrypi, "service_active", return_value=True)
-    @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("● mounted", "/mnt/nasberry"))
+    @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("● mounted in NAS mode", "/mnt/nasberry"))
     @mock.patch.object(nasberrypi, "device_exists", return_value=True)
     def test_menu_status_keeps_private_and_backups_local_only(self, _device, _mount, _sharing, _usage):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
