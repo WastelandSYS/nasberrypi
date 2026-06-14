@@ -994,7 +994,7 @@ def read_menu_key():
 
 def show_action_feedback(label):
     clear()
-    print(centered(panel("OPENING", [label, "Complete the prompts below, then return to the dashboard."])))
+    print(centered(panel("NASBERRY", [label, "Complete the prompts below, then return to the dashboard."])))
     print()
 
 
