@@ -21,7 +21,8 @@ Turn a Raspberry Pi and a USB storage device into a personal network-attached st
 * Guided storage setup wizard
 * Automatic drive detection
 * Mount and unmount controls
-* Storage validation and status monitoring
+* NAS-mode and external mount awareness
+* Storage validation and storage-only status reporting
 * Safe storage handling and recovery
 
 ### Network Sharing
@@ -54,9 +55,9 @@ Turn a Raspberry Pi and a USB storage device into a personal network-attached st
 
 | State      | Purpose                                          |
 | ---------- | ------------------------------------------------ |
-| Offline    | Storage device not mounted                       |
-| Mounted    | Storage available locally                        |
-| Shared     | Network sharing active                           |
+| Offline    | Storage safely unmounted and sharing offline     |
+| Mounted    | Storage mounted in NAS mode or mounted elsewhere |
+| Shared     | Storage mounted in NAS mode and sharing online    |
 | Safe Mode  | Sharing services disabled until manually started |
 | Panic Lock | Emergency shutdown of active shares              |
 
@@ -91,6 +92,10 @@ Configure storage devices, mount points, and NAS settings.
 ## Mounted Storage
 
 View mounted device information and storage status.
+
+```bash
+sudo nasberry storage
+```
 
 <p align="center">
 [SCREENSHOT - MOUNTED STORAGE]
@@ -225,7 +230,7 @@ Main management functions:
 | Option           | Description                            |
 | ---------------- | -------------------------------------- |
 | Setup Storage    | Configure NAS storage device           |
-| Mount Storage    | Mount configured storage               |
+| Mount Storage    | Mount configured storage in NAS mode   |
 | Unmount Storage  | Safely unmount storage                 |
 | Start Share      | Enable network file sharing            |
 | Stop Share       | Disable network file sharing           |
@@ -239,6 +244,16 @@ Help menu:
 ```bash
 nasberry -h
 ```
+
+Storage-only status:
+
+```bash
+sudo nasberry storage
+```
+
+This reports the configured storage device, whether it is present, its filesystem, mount state, active mount point, configured Nasberry mount point, and disk space. Mount state is reported as **mounted in NAS mode**, **mounted elsewhere**, or **safely unmounted**.
+
+If `nasberry mount` finds the configured drive mounted elsewhere, interactive use shows the current and configured Nasberry mount points and asks before moving the drive into NAS mode. Press Enter or answer `n` to leave the existing mount untouched.
 
 ---
 
@@ -271,6 +286,7 @@ Notes:
 
 * Samba is installed automatically by the installer.
 * ext4 is the recommended filesystem for Linux-based NAS deployments.
+* Desktop environments may mount a configured drive outside the Nasberry mount point. Nasberry reports this as **mounted elsewhere** and asks before moving it into NAS mode.
 * Setup switches Samba into Public-only appliance mode. The previous `/etc/samba/smb.conf` is backed up first, but existing custom shares may be disabled.
 * Network share discovery behavior may vary by operating system.
 
