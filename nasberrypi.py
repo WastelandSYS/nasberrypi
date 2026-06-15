@@ -1110,9 +1110,14 @@ def read_menu_key():
         termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
 
 
-def show_action_feedback(label):
+def show_action_feedback(label, mode="action"):
+    messages = {
+        "action": "Executing requested operation. Status updates will appear below.",
+        "prompt": "Complete the prompts below, then return to the dashboard.",
+        "report": "Review the report below, then return to the dashboard.",
+    }
     clear()
-    print(centered(panel("NASBERRY", [label, "Complete the prompts below, then return to the dashboard."])))
+    print(centered(panel("NASBERRY", [label, messages.get(mode, messages["action"])])))
     print()
 
 
@@ -1167,6 +1172,18 @@ def menu():
         "7": ("Setup / change drive", setup),
         "8": ("Repair Samba share", repair_samba_share),
     }
+
+    action_modes = {
+        "1": "action",
+        "2": "action",
+        "3": "action",
+        "4": "action",
+        "5": "action",
+        "6": "report",
+        "7": "prompt",
+        "8": "prompt",
+    }
+
     selected = 0
     action_keys = list(actions)
     clean_exit = False
@@ -1187,15 +1204,16 @@ def menu():
                     clean_exit = True
                     state["running"] = False
                 else:
-                    label, action = actions[action_keys[selected]]
-                    show_action_feedback(label)
+                    key = action_keys[selected]
+                    label, action = actions[key]
+                    show_action_feedback(label, action_modes.get(key, "action"))
                     action()
                     pause()
                     clear()
             elif choice in actions:
                 selected = action_keys.index(choice)
                 label, action = actions[choice]
-                show_action_feedback(label)
+                show_action_feedback(label, action_modes.get(choice, "action"))
                 action()
                 pause()
                 clear()
