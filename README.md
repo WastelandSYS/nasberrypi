@@ -74,7 +74,7 @@ sudo nasberry
 ```
 
 <p align="center">
-<img width="641" height="465" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/5e0371fa-a03c-4c18-95e0-1a18b93c1bb1" />
+<img width="802" height="516" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/bb58a2e4-378e-4d2a-bc20-29cbdfd69690" />
 </p>
 
 ---
@@ -88,7 +88,7 @@ sudo nasberry setup
 ```
 
 <p align="center">
-<img width="849" height="651" alt="NasberrySetup" src="https://github.com/user-attachments/assets/c3d8fd78-bdfb-4004-b74e-9bd4eda64a5a" />
+<img width="850" height="650" alt="NasberrySetup" src="https://github.com/user-attachments/assets/8587829c-c981-4e9d-984b-3ad373b63503" />
 </p>
 
 ---
@@ -102,7 +102,7 @@ sudo nasberry doctor
 ```
 
 <p align="center">
-<img width="650" height="616" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/d36c2608-1dc1-4ec1-ac7f-bace157a7062" />
+<img width="801" height="804" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/3078d602-bb9b-4740-8ab2-7670c9475150" />
 </p>
 
 ---
@@ -112,7 +112,7 @@ sudo nasberry doctor
 Network share running and accessible from other devices.
 
 <p align="center">
-[SCREENSHOT - ACTIVE SHARE]
+<img width="1000" height="1080" alt="NasberryWorking" src="https://github.com/user-attachments/assets/116dc657-b10d-4e2d-a4d7-c331161cac77" />
 </p>
 
 ---
@@ -122,7 +122,7 @@ Network share running and accessible from other devices.
 Immediately stop sharing services and secure storage access.
 
 <p align="center">
-<img width="641" height="209" alt="NasberryEmergencyLock" src="https://github.com/user-attachments/assets/f1b25ab8-58e6-43cd-9e9b-eded85698cba" />
+<img width="801" height="214" alt="NasberryEmergencyLock" src="https://github.com/user-attachments/assets/658e812e-0bc9-4776-a9c4-abdb8b0ee41a" />
 </p>
 
 ---
