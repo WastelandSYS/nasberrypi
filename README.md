@@ -4,7 +4,7 @@
 
 <!-- ========================================================= -->
 
-<img width="2000" height="700" alt="NASBERRYMAINBNRM" src="https://github.com/user-attachments/assets/ce0fc81a-6091-48d3-8147-b1f207bc3812" />
+<img width="2172" height="724" alt="NasberryMainBnr" src="https://github.com/user-attachments/assets/9ebb7744-27e8-44f8-897c-b48323f7be36" />
 
 # nasberrypi
 
