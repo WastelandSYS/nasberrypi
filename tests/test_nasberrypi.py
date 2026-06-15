@@ -229,6 +229,59 @@ class NasberryTests(unittest.TestCase):
         self.assertTrue(all(len(line) == 24 for line in rendered))
         self.assertGreater(len(rendered), 3)
 
+    def test_log_colorizes_status_symbol_when_color_is_enabled(self):
+        with mock.patch.object(nasberrypi, "color_enabled", return_value=True), mock.patch("builtins.print") as output:
+            nasberrypi.log("✔ Sharing online")
+        self.assertIn("\033[1;32m✔ Sharing online\033[0m", output.call_args.args[0])
+
+    def test_doctor_groups_checks_and_emphasizes_result(self):
+        with mock.patch.object(nasberrypi, "check", return_value=True), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "storage_mount_state", return_value="safely_unmounted"), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=""), \
+             mock.patch.object(nasberrypi, "public_folder_access_valid", return_value=(True, "ready")), \
+             mock.patch.object(nasberrypi, "protected_folder_status", return_value=(True, "protected")), \
+             mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "ready")), \
+             mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "enabled")), \
+             mock.patch.object(nasberrypi, "print_connection_info"), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False), \
+             mock.patch("builtins.print") as output:
+            self.assertTrue(nasberrypi.doctor())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        for section in ("SYSTEM", "STORAGE", "SAMBA", "NETWORK", "RESULT"):
+            self.assertIn(section, rendered)
+        self.assertIn("✔ Result: 21/21 checks passed", rendered)
+
+    def test_dashboard_action_suppresses_nested_operation_header(self):
+        with mock.patch("builtins.print") as output:
+            nasberrypi.run_dashboard_action(
+                lambda: nasberrypi.operation_header("MOUNT STORAGE", "Preparing storage for NAS access")
+            )
+        output.assert_not_called()
+        self.assertNotIn("dashboard_action", nasberrypi.state)
+
+    def test_dashboard_action_suppresses_diagnostics_panel(self):
+        with mock.patch.object(nasberrypi, "section_header"), \
+             mock.patch.object(nasberrypi, "check", return_value=True), \
+             mock.patch.object(nasberrypi, "storage_mount_state", return_value="safely_unmounted"), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=""), \
+             mock.patch.object(nasberrypi, "public_folder_access_valid", return_value=(True, "ready")), \
+             mock.patch.object(nasberrypi, "protected_folder_status", return_value=(True, "protected")), \
+             mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "ready")), \
+             mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "enabled")), \
+             mock.patch.object(nasberrypi, "print_connection_info"), \
+             mock.patch("builtins.print") as output:
+            nasberrypi.run_dashboard_action(nasberrypi.doctor)
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertNotIn("DIAGNOSTICS", rendered)
+        self.assertIn("Result:", rendered)
+
+    @mock.patch.object(nasberrypi, "clear")
+    def test_action_feedback_does_not_add_extra_blank_line(self, _clear):
+        with mock.patch("builtins.print") as output:
+            nasberrypi.show_action_feedback("Setup / change drive", "prompt")
+        self.assertEqual(output.call_count, 1)
+
     @mock.patch.object(nasberrypi, "menu_status_lines", return_value=["Storage ready"])
     @mock.patch.object(nasberrypi, "terminal_width", return_value=60)
     def test_menu_presentation_centers_branding_and_shows_shortcuts(self, _width, _status):
