@@ -88,6 +88,12 @@ refresh_settings()
 
 
 def log(msg):
+    if msg.startswith("✔"):
+        msg = styled(msg, "1", "32")
+    elif msg.startswith("✖"):
+        msg = styled(msg, "1", "31")
+    elif msg.startswith("⚠"):
+        msg = styled(msg, "1", "33")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 
@@ -280,6 +286,7 @@ def cleanup_other_mounts(confirm=True):
 
 
 def mount_storage(repair_permissions=False):
+    operation_header("MOUNT STORAGE", "Preparing storage for NAS access")
     if not ensure_mount_point() or not cleanup_other_mounts(confirm=not repair_permissions):
         write_state(is_mounted(), service_active())
         return False
@@ -346,6 +353,7 @@ def enforce_boot_safety():
 
 
 def unmount_storage():
+    operation_header("UNMOUNT STORAGE", "Safely disconnecting NAS storage")
     mount_point = active_mount_point()
 
     if not mount_point:
@@ -485,6 +493,7 @@ def samba_config_valid():
 
 
 def start_share():
+    operation_header("START SHARING", "Bringing the Public network share online")
     if not service_exists(SAMBA_SERVICE):
         log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. Run 'nasberry doctor'.")
         write_state(is_mounted(), False)
@@ -505,7 +514,7 @@ def start_share():
     time.sleep(1)
     active = result.returncode == 0 and service_active()
     if active:
-        log("✔ NAS SHARE ONLINE")
+        log("✔ Sharing online")
         print_connection_info()
     else:
         log(f"✖ Failed to start sharing: {result.stderr.strip() or 'check systemctl status'}")
@@ -514,6 +523,7 @@ def start_share():
 
 
 def stop_share():
+    operation_header("STOP SHARING", "Taking the Public network share offline")
     if not service_exists(SAMBA_SERVICE):
         write_state(is_mounted(), False)
         return True
@@ -521,7 +531,7 @@ def stop_share():
     result = run(sudo_cmd("systemctl", "stop", SAMBA_SERVICE))
     time.sleep(1)
     stopped = result.returncode == 0 and not service_active()
-    log("✔ NAS SHARE OFFLINE" if stopped else f"✖ Failed to stop sharing: {result.stderr.strip()}")
+    log("✔ Sharing offline" if stopped else f"✖ Failed to stop sharing: {result.stderr.strip()}")
     write_state(is_mounted(), service_active())
     return stopped
 
@@ -549,7 +559,8 @@ def verify_pin():
 
 
 def panic_lock():
-    log("!!! EMERGENCY LOCK ACTIVATED !!!")
+    operation_header("EMERGENCY LOCK", "Stopping sharing and securing storage")
+    log("⚠ Emergency lock activated")
     return stop_share() and unmount_storage()
 
 
@@ -631,12 +642,23 @@ def print_connection_info():
         print(f"  macOS/Linux: smb://{address}/{SHARE_NAME}")
 
 
-def check(label, ok, detail, fix=""):
+def check(label, ok, detail, fix="", label_width=0):
     symbol = "✔" if ok else "✖"
-    print(f"{symbol} {label}: {detail}")
+    symbol = styled(symbol, "1", "32" if ok else "31")
+    label = f"{label:<{label_width}}" if label_width else label
+    print(f"{symbol} {label}  {detail}")
     if not ok and fix:
-        print(f"    Fix: {fix}")
+        print(f"  {styled('Fix:', '1', '33')} {fix}")
     return ok
+
+
+def section_header(title):
+    print(f"\n{styled(title, '1', '36')}")
+
+
+def operation_header(title, subtitle):
+    if not state.get("dashboard_action"):
+        print("\n".join(panel(title, [subtitle])))
 
 
 def public_folder_access_valid():
@@ -708,16 +730,20 @@ def print_windows_credential_hint():
 
 
 def doctor():
-    print("Nasberry diagnostics\n====================")
+    if not state.get("dashboard_action"):
+        print("\n".join(panel("DIAGNOSTICS", ["Storage, Samba, and system health"])))
     results = []
+    label_width = 27
     app_path = str(Path(__file__).resolve())
-    results.append(check("Nasberry application", True, f"v{APP_VERSION} at {app_path}"))
-    results.append(check("Configuration", CONFIG_FILE.exists(), str(CONFIG_FILE), "Run 'sudo nasberry setup'."))
-    results.append(check("Privileges", os.geteuid() == 0 or command_exists("sudo"), "root/sudo available" if os.geteuid() == 0 or command_exists("sudo") else "sudo unavailable", "Run Nasberry as root."))
+    section_header("SYSTEM")
+    results.append(check("Application version", True, f"v{APP_VERSION} at {app_path}", label_width=label_width))
+    results.append(check("Configuration", CONFIG_FILE.exists(), str(CONFIG_FILE), "Run 'sudo nasberry setup'.", label_width))
+    results.append(check("Privileges", os.geteuid() == 0 or command_exists("sudo"), "root/sudo available" if os.geteuid() == 0 or command_exists("sudo") else "sudo unavailable", "Run Nasberry as root.", label_width))
     for command in ("mount", "umount", "lsblk", "systemctl", "smbd", "testparm", "ip", "smbpasswd", "pdbedit"):
-        results.append(check(f"Command {command}", command_exists(command), shutil.which(command) or "missing", "Re-run install.sh."))
-    results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'."))
-    results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}"))
+        results.append(check(f"Required command: {command}", command_exists(command), shutil.which(command) or "missing", "Re-run install.sh.", label_width))
+    section_header("STORAGE")
+    results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'.", label_width))
+    results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}", label_width))
     mount_state = storage_mount_state()
     active = active_mount_point()
     mount_details = {
@@ -725,19 +751,24 @@ def doctor():
         "mounted_nas": f"mounted in NAS mode at {active}",
         "mounted_elsewhere": f"mounted elsewhere at {active}; configured Nasberry mount point: {MOUNT_POINT}",
     }
-    results.append(check("Storage mount state", True, mount_details[mount_state]))
-    results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup."))
-    valid, reason = samba_config_valid()
-    results.append(check("Samba share", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it."))
+    results.append(check("Mount state", True, mount_details[mount_state], label_width=label_width))
     public_ok, public_detail = public_folder_access_valid()
-    results.append(check("Public folder access", public_ok, public_detail, "Run 'sudo nasberry repair-samba' to repair it."))
+    results.append(check("Public folder access", public_ok, public_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
     for folder_name in ("Private", "Backups"):
         protected_ok, protected_detail = protected_folder_status(folder_name)
-        results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it."))
+        results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it.", label_width))
+    section_header("SAMBA")
+    results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup.", label_width))
+    valid, reason = samba_config_valid()
+    results.append(check("Samba share", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it.", label_width))
     account_ok, account_detail = samba_account_valid()
-    results.append(check("Samba account", account_ok, account_detail, f"Run 'sudo smbpasswd -a {SHARE_USER}' to create or reset it." if SHARE_USER else "Run 'sudo nasberry setup'."))
+    results.append(check("Samba account", account_ok, account_detail, f"Run 'sudo smbpasswd -a {SHARE_USER}' to create or reset it." if SHARE_USER else "Run 'sudo nasberry setup'.", label_width))
+    section_header("NETWORK")
     print_connection_info()
-    print(f"\nResult: {sum(results)}/{len(results)} checks passed")
+    section_header("RESULT")
+    passed = sum(results)
+    symbol, color = ("✔", "32") if passed == len(results) else (("⚠", "33") if passed >= len(results) * 0.75 else ("✖", "31"))
+    print(styled(f"{symbol} Result: {passed}/{len(results)} checks passed", "1", color))
     return all(results)
 
 
@@ -853,6 +884,7 @@ def restart_samba_service():
 
 
 def repair_samba_share():
+    operation_header("REPAIR SAMBA", "Validating and restoring the Public share")
     if os.geteuid() != 0:
         log("✖ Samba repair must run as root: sudo nasberry repair-samba")
         return False
@@ -941,6 +973,7 @@ def configure_samba_share():
 
 
 def setup(non_interactive=False, skip_pin=False):
+    operation_header("SETUP", "Configuring Nasberry appliance storage and sharing")
     if os.geteuid() != 0:
         log("✖ Setup changes system files and must run as root: sudo nasberry setup")
         return False
@@ -1118,7 +1151,6 @@ def show_action_feedback(label, mode="action"):
     }
     clear()
     print(centered(panel("NASBERRY", [label, messages.get(mode, messages["action"])])))
-    print()
 
 
 def show_menu_exit():
@@ -1159,6 +1191,14 @@ def protected(action):
         return action()
     log("ACCESS DENIED")
     return False
+
+
+def run_dashboard_action(action):
+    state["dashboard_action"] = True
+    try:
+        return action()
+    finally:
+        state.pop("dashboard_action", None)
 
 
 def menu():
@@ -1207,14 +1247,14 @@ def menu():
                     key = action_keys[selected]
                     label, action = actions[key]
                     show_action_feedback(label, action_modes.get(key, "action"))
-                    action()
+                    run_dashboard_action(action)
                     pause()
                     clear()
             elif choice in actions:
                 selected = action_keys.index(choice)
                 label, action = actions[choice]
                 show_action_feedback(label, action_modes.get(choice, "action"))
-                action()
+                run_dashboard_action(action)
                 pause()
                 clear()
     except KeyboardInterrupt:
