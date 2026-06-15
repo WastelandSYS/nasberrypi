@@ -74,31 +74,35 @@ sudo nasberry
 ```
 
 <p align="center">
-<img width="640" height="461" alt="nasberrymainmenu" src="https://github.com/user-attachments/assets/74e40617-cf88-4431-9fa2-5849e8e8c2ff" />
+<img width="641" height="465" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/5e0371fa-a03c-4c18-95e0-1a18b93c1bb1" />
 </p>
 
 ---
 
-## Storage Setup Wizard
+## Nasberry Setup
 
 Configure storage devices, mount points, and NAS settings.
 
+```bash
+sudo nasberry setup
+```
+
 <p align="center">
-[SCREENSHOT - STORAGE SETUP]
+<img width="849" height="651" alt="NasberrySetup" src="https://github.com/user-attachments/assets/c3d8fd78-bdfb-4004-b74e-9bd4eda64a5a" />
 </p>
 
 ---
 
-## Mounted Storage
+## Nasberry Diagnostics
 
-View mounted device information and storage status.
+Run a complete health check of storage, Samba, permissions, configuration, and system requirements.
 
 ```bash
-sudo nasberry storage
+sudo nasberry doctor
 ```
 
 <p align="center">
-[SCREENSHOT - MOUNTED STORAGE]
+<img width="650" height="616" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/d36c2608-1dc1-4ec1-ac7f-bace157a7062" />
 </p>
 
 ---
@@ -113,22 +117,12 @@ Network share running and accessible from other devices.
 
 ---
 
-## Safe Mode
-
-Disable automatic sharing services for maintenance or troubleshooting.
-
-<p align="center">
-[SCREENSHOT - SAFE MODE]
-</p>
-
----
-
-## Panic Lock
+## Emergency lock
 
 Immediately stop sharing services and secure storage access.
 
 <p align="center">
-[SCREENSHOT - PANIC LOCK]
+<img width="641" height="209" alt="NasberryEmergencyLock" src="https://github.com/user-attachments/assets/f1b25ab8-58e6-43cd-9e9b-eded85698cba" />
 </p>
 
 ---
