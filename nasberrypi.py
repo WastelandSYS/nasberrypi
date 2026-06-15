@@ -112,6 +112,17 @@ def clear():
         os.system("clear")
 
 
+def draw_screen(text):
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[H")
+        sys.stdout.write(text)
+        sys.stdout.write("\n")
+        sys.stdout.write("\033[J")
+        sys.stdout.flush()
+    else:
+        print(text)
+
+
 def pause():
     input("\n  Press Enter to continue...")
 
@@ -1160,9 +1171,9 @@ def menu():
     action_keys = list(actions)
     clean_exit = False
     try:
+        clear()
         while state["running"]:
-            clear()
-            print(render_menu(actions, selected))
+            draw_screen(render_menu(actions, selected))
             choice = read_menu_key()
             if choice in {"q", "9", "\x03"}:
                 clean_exit = True
@@ -1180,12 +1191,14 @@ def menu():
                     show_action_feedback(label)
                     action()
                     pause()
+                    clear()
             elif choice in actions:
                 selected = action_keys.index(choice)
                 label, action = actions[choice]
                 show_action_feedback(label)
                 action()
                 pause()
+                clear()
     except KeyboardInterrupt:
         clean_exit = True
         state["running"] = False
