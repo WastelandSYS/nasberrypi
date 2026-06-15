@@ -194,19 +194,19 @@ Enable network sharing through the dashboard.
 Windows:
 
 ```text
-\\hostname
+\\hostname\Public
 ```
 
 Linux:
 
 ```text
-smb://hostname
+smb://hostname/Public
 ```
 
 macOS:
 
 ```text
-smb://hostname
+smb://hostname/Public
 ```
 
 ---
@@ -229,7 +229,7 @@ Main management functions:
 | Start Share      | Enable network file sharing            |
 | Stop Share       | Disable network file sharing           |
 | Repair Samba     | Repair Samba configuration             |
-| Safe Mode        | Disable automatic sharing services     |
+| Safe Mode CLI    | Disable automatic sharing services     |
 | Panic Lock       | Immediate shutdown of sharing services |
 | Status Dashboard | View NAS health and status             |
 
