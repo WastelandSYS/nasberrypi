@@ -102,7 +102,7 @@ sudo nasberry doctor
 ```
 
 <p align="center">
-<img width="801" height="804" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/3078d602-bb9b-4740-8ab2-7670c9475150" />
+<img width="800" height="821" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/b04dd7ec-deda-470c-91c1-6efeb739dd76" />
 </p>
 
 ---
@@ -112,7 +112,7 @@ sudo nasberry doctor
 Network share running and accessible from other devices.
 
 <p align="center">
-<img width="1000" height="1080" alt="NasberryWorking" src="https://github.com/user-attachments/assets/116dc657-b10d-4e2d-a4d7-c331161cac77" />
+<img width="1000" height="1080" alt="NasberryWorking" src="https://github.com/user-attachments/assets/09a76b4c-4807-45dc-814d-bbba1bac449c" />
 </p>
 
 ---
