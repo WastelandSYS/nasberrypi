@@ -636,10 +636,12 @@ def print_connection_info():
     if not addresses:
         log("Network address unavailable; run 'nasberry doctor'.")
         return
+
     print("\nConnect from another device:")
     for address in addresses:
-        print(f"  Windows: \\\\{address}\\{SHARE_NAME}")
-        print(f"  macOS/Linux: smb://{address}/{SHARE_NAME}")
+        print(f"  Windows      : \\\\{address}\\{SHARE_NAME}")
+        print(f"  macOS/Linux  : smb://{address}/{SHARE_NAME}")
+        print(f"  Android/iOS  : smb://{address}/{SHARE_NAME}")
 
 
 def check(label, ok, detail, fix="", label_width=0):
