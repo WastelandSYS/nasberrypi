@@ -197,17 +197,46 @@ Windows:
 \\hostname\Public
 ```
 
-Linux:
+macOS/Linux:
 
 ```text
 smb://hostname/Public
 ```
 
-macOS:
+Android:
+
+Use an SMB-compatible file manager such as:
+
+- CX File Explorer
+- Solid Explorer
+- X-plore File Manager
+
+Server:
 
 ```text
-smb://hostname/Public
+hostname
 ```
+
+Port:
+
+```text
+445
+```
+
+Sign in using your Nasberry username and password.
+
+iPhone / iPad:
+
+1. Open the Files app
+2. Tap the menu button
+3. Select **Connect to Server**
+4. Enter:
+
+```text
+smb://hostname
+```
+
+5. Sign in using your Nasberry username and password.
 
 ---
 
