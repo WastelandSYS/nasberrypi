@@ -290,6 +290,7 @@ Tested on:
 * Kali Linux ARM
 * Raspberry Pi 4B
 * Raspberry Pi 5
+* Raspberry Pi Zero 2w
 
 Supported storage:
 
