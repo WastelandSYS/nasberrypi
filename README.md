@@ -74,7 +74,7 @@ sudo nasberry
 ```
 
 <p align="center">
-<img width="802" height="516" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/bb58a2e4-378e-4d2a-bc20-29cbdfd69690" />
+<img width="642" height="478" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/ab09b9db-d5e8-4dca-bf81-6c9ada583698" />
 </p>
 
 ---
@@ -88,7 +88,7 @@ sudo nasberry setup
 ```
 
 <p align="center">
-<img width="850" height="650" alt="NasberrySetup" src="https://github.com/user-attachments/assets/8587829c-c981-4e9d-984b-3ad373b63503" />
+<img width="818" height="632" alt="NasberrySetup" src="https://github.com/user-attachments/assets/fcd64ed3-f7d4-4220-8e53-fa0e27dbfa92" />
 </p>
 
 ---
@@ -102,7 +102,7 @@ sudo nasberry doctor
 ```
 
 <p align="center">
-<img width="800" height="821" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/b04dd7ec-deda-470c-91c1-6efeb739dd76" />
+<img width="674" height="753" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/91918795-c6c7-4454-98ac-d1e255ec3aee" />
 </p>
 
 ---
