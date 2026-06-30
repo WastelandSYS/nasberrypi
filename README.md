@@ -28,7 +28,7 @@ Turn a Raspberry Pi and a USB storage device into a personal network-attached st
 ### Network Sharing
 
 * Samba-based network file sharing
-* Automatic share configuration
+* Automatic multiple shared-folder configuration
 * Cross-platform device compatibility
 * Share status monitoring
 * Share user management
@@ -203,6 +203,12 @@ macOS/Linux:
 smb://hostname/Public
 ```
 
+`Public` remains the default shared folder. Add more managed shares with:
+
+```bash
+sudo nasberry shares
+```
+
 Android:
 
 Use an SMB-compatible file manager such as:
@@ -257,6 +263,7 @@ Main management functions:
 | Unmount Storage  | Safely unmount storage                 |
 | Start Share      | Enable network file sharing            |
 | Stop Share       | Disable network file sharing           |
+| Manage Shares    | Add, remove, enable, disable, or toggle read-only shared folders |
 | Repair Samba     | Repair Samba configuration             |
 | Safe Mode CLI    | Disable automatic sharing services     |
 | Panic Lock       | Immediate shutdown of sharing services |
@@ -311,7 +318,8 @@ Notes:
 * Samba is installed automatically by the installer.
 * ext4 is the recommended filesystem for Linux-based NAS deployments.
 * Desktop environments may mount a configured drive outside the Nasberry mount point. Nasberry reports this as **mounted elsewhere** and asks before moving it into NAS mode.
-* Setup switches Samba into Public-only appliance mode. The previous `/etc/samba/smb.conf` is backed up first, but existing custom shares may be disabled.
+* Setup creates a default `Public` share and stores managed shared folders in `/etc/nasberry/shares.json`.
+* Nasberry updates only the clearly marked NasberryPi section in `/etc/samba/smb.conf`. The previous file is backed up before changes, and unrelated Samba configuration is preserved.
 * Network share discovery behavior may vary by operating system.
 
 ---
@@ -336,7 +344,7 @@ sudo testparm -s /etc/samba/smb.conf
 sudo systemctl restart smbd
 ```
 
-Nasberry's configuration is stored at `/etc/nasberry/config.ini`. Run `sudo nasberry doctor` for diagnostics or `sudo nasberry repair-samba` to recreate and validate the managed Public share.
+Nasberry's core configuration is stored at `/etc/nasberry/config.ini`, and managed shared folders are stored at `/etc/nasberry/shares.json`. Run `sudo nasberry doctor` for diagnostics, `sudo nasberry shares` to manage folders, or `sudo nasberry repair-samba` to recreate and validate the managed Samba section.
 
 ---
 

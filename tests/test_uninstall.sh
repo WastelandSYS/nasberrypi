@@ -42,7 +42,7 @@ run_uninstall() {
         NASBERRY_CONFIG_DIR="$TMP/etc/nasberry" \
         NASBERRY_SMB_CONF="$TMP/etc/samba/smb.conf" \
         NASBERRY_MOUNT_POINT="$TMP/mnt/nasberry" \
-        "$ROOT_DIR/uninstall.sh" "$@"
+        bash "$ROOT_DIR/uninstall.sh" "$@"
 }
 
 run_uninstall --yes
@@ -92,6 +92,28 @@ grep -Fq '[global]' "$TMP/etc/samba/smb.conf"
 
 mkdir -p "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/etc/nasberry" "$TMP/mnt/nasberry"
 printf 'app\n' > "$TMP/opt/nasberry/nasberrypi.py"
+printf 'config\n' > "$TMP/etc/nasberry/config.ini"
+cat > "$TMP/etc/samba/smb.conf" <<'EOF'
+[global]
+   workgroup = WORKGROUP
+
+# BEGIN NasberryPi managed shares
+[Public]
+   path = /mnt/nasberry/Public
+[Media]
+   path = /mnt/nasberry/Media
+# END NasberryPi managed shares
+
+[OtherShare]
+   path = /srv/other
+EOF
+run_uninstall --yes --purge
+! grep -Fq '[Media]' "$TMP/etc/samba/smb.conf"
+! grep -Fq 'BEGIN NasberryPi managed shares' "$TMP/etc/samba/smb.conf"
+grep -Fq '[OtherShare]' "$TMP/etc/samba/smb.conf"
+
+mkdir -p "$TMP/opt/nasberry" "$TMP/usr/local/bin" "$TMP/etc/nasberry" "$TMP/mnt/nasberry"
+printf 'app\n' > "$TMP/opt/nasberry/nasberrypi.py"
 printf 'keep me\n' > "$TMP/mnt/nasberry/user-file.txt"
 run_uninstall --dry-run --purge --remove-mount-point --yes >/dev/null
 [ -e "$TMP/opt/nasberry/nasberrypi.py" ]
@@ -99,7 +121,7 @@ run_uninstall --dry-run --purge --remove-mount-point --yes >/dev/null
 run_uninstall --yes --remove-mount-point >/dev/null
 [ -e "$TMP/mnt/nasberry/user-file.txt" ]
 
-if env PATH="$TMP/bin:$PATH" NASBERRY_INSTALL_DIR=/ NASBERRY_BIN_PATH="$TMP/usr/local/bin/nasberry" NASBERRY_CONFIG_DIR="$TMP/etc/nasberry" NASBERRY_MOUNT_POINT="$TMP/mnt/nasberry" "$ROOT_DIR/uninstall.sh" --yes >/dev/null 2>&1; then
+if env PATH="$TMP/bin:$PATH" NASBERRY_INSTALL_DIR=/ NASBERRY_BIN_PATH="$TMP/usr/local/bin/nasberry" NASBERRY_CONFIG_DIR="$TMP/etc/nasberry" NASBERRY_MOUNT_POINT="$TMP/mnt/nasberry" bash "$ROOT_DIR/uninstall.sh" --yes >/dev/null 2>&1; then
     echo 'unsafe removal path was not rejected' >&2
     exit 1
 fi

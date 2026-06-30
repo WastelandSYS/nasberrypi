@@ -17,7 +17,28 @@ log() { printf '%s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null || die "Required command '$1' was not found."; }
 safe_removal_path() {
-    case "$1" in ""|/|.) die "Refusing unsafe removal path: ${1:-<empty>}" ;; esac
+    local path="$1"
+    local expected_name="${2:-}"
+    case "$path" in
+        ""|/|.) die "Refusing unsafe removal path: ${path:-<empty>}" ;;
+        /*) ;;
+        *) die "Refusing non-absolute removal path: $path" ;;
+    esac
+    case "$path" in
+        *"/.."|*"/../"*|*"//"*) die "Refusing unsafe removal path: $path" ;;
+    esac
+    if [ -n "$expected_name" ] && [ "$(basename "$path")" != "$expected_name" ]; then
+        die "Refusing unexpected Nasberry path: $path"
+    fi
+}
+safe_mount_point_path() {
+    local path="$1"
+    safe_removal_path "$path"
+    case "$path" in
+        /bin|/boot|/dev|/etc|/home|/lib|/lib64|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/bin|/usr/local|/usr/local/bin|/var)
+            die "Refusing unsafe mount-point path: $path"
+            ;;
+    esac
 }
 usage() {
     cat <<'EOF'
@@ -48,11 +69,11 @@ done
 
 [ "$EUID" -eq 0 ] || die "Run this uninstaller as root: sudo ./uninstall.sh"
 require_command mountpoint
-safe_removal_path "$INSTALL_DIR"
-safe_removal_path "$BIN_PATH"
-safe_removal_path "$SYSTEM_BIN_PATH"
-safe_removal_path "$CONFIG_DIR"
-safe_removal_path "$MOUNT_POINT"
+safe_removal_path "$INSTALL_DIR" "nasberry"
+safe_removal_path "$BIN_PATH" "nasberry"
+safe_removal_path "$SYSTEM_BIN_PATH" "nasberry"
+safe_removal_path "$CONFIG_DIR" "nasberry"
+safe_mount_point_path "$MOUNT_POINT"
 run_action() {
     if "$DRY_RUN"; then
         printf 'Would run:'
@@ -67,7 +88,8 @@ remove_managed_share() {
     [ -f "$SMB_CONF" ] || { log "Samba config not found; skipping managed-share cleanup."; return 0; }
     local marker="# Managed by Nasberry: $SHARE_NAME"
     local appliance_header="# Managed by Nasberry appliance mode. Previous config is saved before replacement."
-    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF" && ! grep -Fq "$appliance_header" "$SMB_CONF"; then
+    local shares_begin="# BEGIN NasberryPi managed shares"
+    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF" && ! grep -Fq "$appliance_header" "$SMB_CONF" && ! grep -Fq "$shares_begin" "$SMB_CONF"; then
         log "No Nasberry-managed Samba settings found; leaving Samba configuration unchanged."
         return 0
     fi
@@ -83,7 +105,7 @@ remove_managed_share() {
     backup="${SMB_CONF}.nasberry-uninstall.$(date +%Y%m%d%H%M%S%N).bak"
     temp="$(mktemp "${SMB_CONF}.nasberry-uninstall.XXXXXX")"
     cp -a "$SMB_CONF" "$backup"
-    python3 - "$SMB_CONF" "$temp" "$marker" "$appliance_header" "$SHARE_NAME" <<'PY'
+    python3 - "$SMB_CONF" "$temp" "$marker" "$appliance_header" "$SHARE_NAME" "$shares_begin" <<'PY'
 import sys
 from pathlib import Path
 
@@ -92,6 +114,8 @@ destination = Path(sys.argv[2])
 marker = sys.argv[3]
 appliance_header = sys.argv[4]
 share_header = f"[{sys.argv[5]}]".lower()
+shares_begin = sys.argv[6]
+shares_end = "# END NasberryPi managed shares"
 lines = source.read_text().splitlines(keepends=True)
 current_appliance = any(line.strip() == appliance_header for line in lines)
 output = []
@@ -103,7 +127,13 @@ for line in lines:
     if stripped == "# BEGIN Managed by Nasberry appliance mode":
         in_managed_block = True
         continue
+    if stripped == shares_begin:
+        in_managed_block = True
+        continue
     if stripped == "# END Managed by Nasberry appliance mode":
+        in_managed_block = False
+        continue
+    if stripped == shares_end:
         in_managed_block = False
         continue
     if in_managed_block:
