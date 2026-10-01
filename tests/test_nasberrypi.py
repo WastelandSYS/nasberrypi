@@ -29,6 +29,19 @@ class NasberryTests(unittest.TestCase):
             self.data = self.data[size:]
             return value
 
+    def setUp(self):
+        self._config_state = (
+            nasberrypi.CONFIG_STATUS,
+            nasberrypi.CONFIG_ERROR,
+            nasberrypi.CONFIG_RUNTIME_ERROR,
+        )
+        nasberrypi.CONFIG_STATUS = "valid"
+        nasberrypi.CONFIG_ERROR = None
+        nasberrypi.CONFIG_RUNTIME_ERROR = None
+
+    def tearDown(self):
+        nasberrypi.CONFIG_STATUS, nasberrypi.CONFIG_ERROR, nasberrypi.CONFIG_RUNTIME_ERROR = self._config_state
+
     def dashboard_actions(self):
         return {
             "1": ("Start sharing files", None),
@@ -58,6 +71,99 @@ class NasberryTests(unittest.TestCase):
             config_file.write_text("[broken")
             loaded = nasberrypi.load_config(config_file)
         self.assertEqual(loaded["nasberry"]["mount_point"], "/mnt/nasberry")
+
+    def test_load_config_reports_missing_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            loaded, status, error = nasberrypi.load_config_with_status(config_file)
+        self.assertEqual(status, "missing")
+        self.assertIn("not configured", error)
+        self.assertEqual(loaded["nasberry"]["mount_point"], "/mnt/nasberry")
+
+    def test_load_config_accepts_complete_and_partial_legacy_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text(
+                "[nasberry]\n"
+                "device = /dev/custom\n"
+                "mount_point = /srv/nasberry\n"
+                "share_user = sparkles\n"
+                "unknown_future_key = keep-me\n"
+            )
+            loaded, status, error = nasberrypi.load_config_with_status(config_file)
+        self.assertEqual(status, "valid")
+        self.assertIsNone(error)
+        self.assertEqual(loaded["nasberry"]["device"], "/dev/custom")
+        self.assertEqual(loaded["nasberry"]["check_delay"], "2")
+        self.assertEqual(loaded["nasberry"]["unknown_future_key"], "keep-me")
+
+    def test_load_config_rejects_broken_ini_transactionally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            for content in (
+                "[nasberry]\ndevice = /dev/custom\n[broken\n",
+                "[nasberry]\ndevice = /dev/custom\ndevice = /dev/other\n",
+                "[nasberry]\ndevice = /dev/custom\n[nasberry]\nmount_point = /srv/nas\n",
+            ):
+                config_file.write_text(content)
+                loaded, status, error = nasberrypi.load_config_with_status(config_file)
+                self.assertEqual(status, "invalid")
+                self.assertIn("invalid configuration", error)
+                self.assertEqual(loaded["nasberry"]["device"], nasberrypi.DEFAULTS["device"])
+
+    def test_load_config_rejects_missing_section_and_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[other]\ndevice = /dev/custom\n")
+            _loaded, status, error = nasberrypi.load_config_with_status(config_file)
+            self.assertEqual(status, "invalid")
+            self.assertIn("[nasberry]", error)
+        unreadable = mock.Mock()
+        unreadable.exists.return_value = True
+        unreadable.open.side_effect = OSError("denied")
+        _loaded, status, error = nasberrypi.load_config_with_status(unreadable)
+        self.assertEqual(status, "invalid")
+        self.assertIn("denied", error)
+
+    def test_load_config_validates_critical_setting_values(self):
+        cases = (
+            ("check_delay = banana", "check_delay"),
+            ("check_delay = -1", "check_delay"),
+            ("safe_mode_on_start = maybe", "safe_mode_on_start"),
+            ("mount_point = ", "mount_point"),
+            ("mount_point = relative/path", "mount_point"),
+            ("mount_point = /", "mount_point"),
+            ("device = ", "device"),
+            ("share_user = bad user", "share_user"),
+            ("samba_service = smbd;rm", "samba_service"),
+            ("samba_services = ", "samba_services"),
+            ("samba_services = smbd,bad/service", "samba_services"),
+            ("state_file = bad\u0001file", "state_file"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            for line, detail in cases:
+                config_file.write_text(f"[nasberry]\n{line}\n")
+                _loaded, status, error = nasberrypi.load_config_with_status(config_file)
+                self.assertEqual(status, "invalid")
+                self.assertIn(detail, error)
+
+    def test_load_config_accepts_supported_delay_and_safe_mode_values(self):
+        for value in ("true", "false", "yes", "no", "on", "off", "1", "0", "TRUE", "False"):
+            with tempfile.TemporaryDirectory() as directory:
+                config_file = Path(directory) / "config.ini"
+                config_file.write_text(f"[nasberry]\ncheck_delay = 0\nsafe_mode_on_start = {value}\n")
+                _loaded, status, error = nasberrypi.load_config_with_status(config_file)
+                self.assertEqual(status, "valid")
+                self.assertIsNone(error)
+
+    def test_invalid_environment_override_blocks_config_dependent_operations(self):
+        with mock.patch.dict(os.environ, {"NASBERRY_CHECK_DELAY": "banana"}):
+            nasberrypi.refresh_settings()
+            self.assertIsNotNone(nasberrypi.CONFIG_RUNTIME_ERROR)
+            self.assertFalse(nasberrypi.config_ready())
+        nasberrypi.refresh_settings()
+        self.assertIsNone(nasberrypi.CONFIG_RUNTIME_ERROR)
 
     def test_save_config_is_private_and_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -624,6 +730,30 @@ class NasberryTests(unittest.TestCase):
         self.assertIn("missing", share_check[2])
         self.assertIn("sudo nasberry setup", share_check[3])
 
+    def test_doctor_reports_invalid_main_configuration_without_storage_probes(self):
+        checks = []
+
+        def fake_check(label, ok, detail, fix="", label_width=22):
+            checks.append((label, ok, detail, fix))
+            return ok
+
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "invalid safe_mode_on_start"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "check", side_effect=fake_check), \
+             mock.patch.object(nasberrypi, "section_header"), \
+             mock.patch.object(nasberrypi, "device_exists") as device_exists, \
+             mock.patch.object(nasberrypi, "command_exists", return_value=True), \
+             mock.patch.object(nasberrypi.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(nasberrypi, "print_connection_info") as connection_info, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.doctor())
+        config_check = next(item for item in checks if item[0] == "Configuration")
+        self.assertFalse(config_check[1])
+        self.assertIn("invalid safe_mode_on_start", config_check[2])
+        device_exists.assert_not_called()
+        connection_info.assert_not_called()
+
     def test_dashboard_action_suppresses_nested_operation_header(self):
         with mock.patch("builtins.print") as output:
             nasberrypi.run_dashboard_action(
@@ -901,6 +1031,16 @@ class NasberryTests(unittest.TestCase):
         self.assertIn("share config error", rendered)
         self.assertNotIn("1 enabled share(s)", rendered)
 
+    def test_menu_status_reports_missing_main_config_without_defaults(self):
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "not configured"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "device_exists") as device_exists:
+            rendered = "\n".join(nasberrypi.menu_status_lines())
+        device_exists.assert_not_called()
+        self.assertIn("Configuration ○ not configured", rendered)
+        self.assertNotIn(nasberrypi.DEFAULTS["device"], rendered)
+
     def test_tty_navigation_mode_stays_active_across_repeated_down_keys(self):
         selections = []
 
@@ -1084,6 +1224,63 @@ class NasberryTests(unittest.TestCase):
         self.assertEqual(status.call_count, 2)
         self.assertEqual(render.call_args_list[0].args[2], ["before"])
         self.assertEqual(render.call_args_list[1].args[2], ["after"])
+
+    def test_dashboard_blocks_operational_action_when_config_is_missing(self):
+        keys = ["1", "q"]
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "not configured"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "read_menu_key", side_effect=keys), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_action_feedback"), \
+             mock.patch.object(nasberrypi, "protected") as protected, \
+             mock.patch.object(nasberrypi, "pause"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+        protected.assert_not_called()
+
+    def test_dashboard_allows_diagnostics_when_config_is_invalid(self):
+        keys = ["6", "q"]
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "read_menu_key", side_effect=keys), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_action_feedback"), \
+             mock.patch.object(nasberrypi, "doctor", return_value=True) as doctor, \
+             mock.patch.object(nasberrypi, "pause"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+        doctor.assert_called_once_with()
+
+    def test_dashboard_setup_selection_reaches_setup_refusal_when_config_is_invalid(self):
+        keys = ["7", "q"]
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "read_menu_key", side_effect=keys), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_action_feedback"), \
+             mock.patch.object(nasberrypi, "setup", return_value=False) as setup, \
+             mock.patch.object(nasberrypi, "pause"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+        setup.assert_called_once_with()
 
     def test_keyboard_interrupt_restores_tty_navigation_mode(self):
         stdin = self.FakeTTY("")
@@ -1295,6 +1492,168 @@ class NasberryTests(unittest.TestCase):
             self.assertFalse(nasberrypi.start_share())
         samba_valid.assert_not_called()
         run.assert_not_called()
+
+    def test_status_reports_missing_config_without_using_defaults(self):
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "not configured"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "device_exists") as device_exists, \
+             mock.patch("builtins.print") as output:
+            self.assertFalse(nasberrypi.status())
+        device_exists.assert_not_called()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Configuration : missing", rendered)
+        self.assertNotIn(nasberrypi.DEFAULTS["device"], rendered)
+
+    def test_storage_info_reports_invalid_config_without_using_defaults(self):
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "invalid safe_mode_on_start"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "active_mount_point") as active_mount, \
+             mock.patch("builtins.print") as output:
+            self.assertFalse(nasberrypi.storage_info())
+        active_mount.assert_not_called()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Configuration       : invalid", rendered)
+        self.assertIn("invalid safe_mode_on_start", rendered)
+
+    def test_main_version_works_with_invalid_config(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "--version"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce:
+            with self.assertRaises(SystemExit) as exit_context:
+                nasberrypi.main()
+        self.assertEqual(exit_context.exception.code, 0)
+        enforce.assert_not_called()
+
+    def test_main_refuses_operational_commands_without_valid_config(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "mount"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.main())
+        mount_storage.assert_not_called()
+
+    def test_main_does_not_enforce_safe_mode_from_invalid_config(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "doctor"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch.object(nasberrypi, "doctor", return_value=True):
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_not_called()
+
+    def test_safe_mode_command_refuses_invalid_config(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "safe-mode", "--yes"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.main())
+        enforce.assert_not_called()
+
+    def test_main_enforces_safe_mode_when_valid_config_requests_it(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "doctor"]), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety", return_value=True) as enforce, \
+             mock.patch.object(nasberrypi, "doctor", return_value=True):
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_called_once_with()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_refuses_invalid_config_without_overwriting(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("[broken")
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", "invalid configuration"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "choose_device") as choose_device, \
+                 mock.patch.object(nasberrypi, "save_config") as save_config, \
+                 mock.patch("builtins.print"):
+                self.assertFalse(nasberrypi.setup())
+            self.assertEqual(config_file.read_text(), "[broken")
+        choose_device.assert_not_called()
+        save_config.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_is_allowed_when_config_is_missing(self, _geteuid):
+        with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "not configured"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "choose_device", return_value=None) as choose_device, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.setup())
+        choose_device.assert_called_once_with(False)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_successful_first_time_setup_publishes_valid_config_state(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", f"not configured: {config_file}"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "MOUNT_POINT", "/srv/nasberry-test"), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_default_shares_file"), \
+                 mock.patch.object(nasberrypi, "mount_storage", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True), \
+                 mock.patch.object(nasberrypi, "configure_samba_share", return_value=True), \
+                 mock.patch.object(nasberrypi, "restart_samba_service", return_value=True), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
+                self.assertEqual(nasberrypi.CONFIG_STATUS, "valid")
+                self.assertIsNone(nasberrypi.CONFIG_ERROR)
+                self.assertTrue(nasberrypi.config_ready())
+                self.assertEqual(nasberrypi.settings["device"], "/dev/disk/by-uuid/abc-123")
+                self.assertEqual(nasberrypi.DEVICE, "/dev/disk/by-uuid/abc-123")
+                self.assertEqual(nasberrypi.settings["mount_point"], "/srv/nasberry-test")
+                self.assertEqual(nasberrypi.MOUNT_POINT, "/srv/nasberry-test")
+                self.assertEqual(nasberrypi.settings["share_user"], "sparkles")
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_stops_if_saved_config_cannot_be_reloaded(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            reloaded = nasberrypi.default_config()
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", f"not configured: {config_file}"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "load_config_with_status", return_value=(reloaded, "invalid", "invalid after save")), \
+                 mock.patch.object(nasberrypi, "ensure_default_shares_file") as ensure_default_shares, \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_storage_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_share_folders, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure_samba, \
+                 mock.patch("builtins.print"):
+                self.assertFalse(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
+                self.assertEqual(nasberrypi.CONFIG_STATUS, "invalid")
+                self.assertEqual(nasberrypi.CONFIG_ERROR, "invalid after save")
+        ensure_default_shares.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_storage_layout.assert_not_called()
+        ensure_share_folders.assert_not_called()
+        configure_samba.assert_not_called()
 
     @mock.patch.object(nasberrypi, "setup", return_value=True)
     def test_cli_setup_accepts_non_interactive_share_user(self, setup):

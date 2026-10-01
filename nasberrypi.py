@@ -51,42 +51,186 @@ DEFAULTS = {
     "pin_hash": "",
 }
 
-def load_config(path):
+
+class ConfigError(Exception):
+    pass
+
+
+def default_config():
     loaded = configparser.ConfigParser(interpolation=None)
     loaded["nasberry"] = DEFAULTS.copy()
-    try:
-        with path.open() as handle:
-            loaded.read_file(handle)
-    except FileNotFoundError:
-        pass
-    except (OSError, configparser.Error) as exc:
-        print(f"WARNING: Could not read configuration {path}: {exc}", file=sys.stderr)
     return loaded
 
 
+def has_control_character(value):
+    return any(ord(character) < 32 or character == "\x7f" for character in value)
+
+
+def parse_config_bool(value, name):
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"invalid {name} value: {value!r}")
+
+
+def parse_config_delay(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"invalid check_delay value: {value!r}") from exc
+    if parsed < 0:
+        raise ConfigError("invalid check_delay value: must be >= 0")
+    return parsed
+
+
+def validate_path_value(value, name, absolute=False, reject_root=False):
+    if not value or has_control_character(value):
+        raise ConfigError(f"invalid {name} value")
+    if absolute and not os.path.isabs(value):
+        raise ConfigError(f"invalid {name} value: must be an absolute path")
+    if reject_root and os.path.abspath(value) == os.path.sep:
+        raise ConfigError(f"invalid {name} value: must not be /")
+    return value
+
+
+def valid_share_user_value(value):
+    return bool(value) and not any(
+        character.isspace() or character in "[]#;=,"
+        for character in value
+    )
+
+
+def valid_service_token(value):
+    return bool(value) and not has_control_character(value) and all(
+        character.isalnum() or character in "_.@:-"
+        for character in value
+    )
+
+
+def validate_config_section(section, path):
+    for name in section:
+        value = section[name]
+        if name == "check_delay":
+            parse_config_delay(value)
+        elif name == "safe_mode_on_start":
+            parse_config_bool(value, name)
+        elif name == "mount_point":
+            validate_path_value(value, name, absolute=True, reject_root=True)
+        elif name == "device":
+            validate_path_value(value, name)
+        elif name == "share_user":
+            if value and not valid_share_user_value(value):
+                raise ConfigError(f"invalid share_user value in {path}")
+        elif name == "samba_service":
+            if not valid_service_token(value):
+                raise ConfigError(f"invalid samba_service value in {path}")
+        elif name == "samba_services":
+            services = [item.strip() for item in value.split(",")]
+            if not services or not any(services):
+                raise ConfigError(f"invalid samba_services value in {path}")
+            for service in services:
+                if not valid_service_token(service):
+                    raise ConfigError(f"invalid samba_services value in {path}")
+        elif name == "state_file":
+            validate_path_value(value, name)
+        elif name == "share_name":
+            if has_control_character(value):
+                raise ConfigError(f"invalid share_name value in {path}")
+
+
+def merge_config_defaults(parsed):
+    loaded = configparser.ConfigParser(interpolation=None)
+    for section in parsed.sections():
+        loaded.add_section(section)
+        for key, value in parsed.items(section, raw=True):
+            loaded[section][key] = value
+    for key, value in DEFAULTS.items():
+        if key not in loaded["nasberry"]:
+            loaded["nasberry"][key] = value
+    return loaded
+
+
+def load_config_with_status(path):
+    parsed = configparser.ConfigParser(interpolation=None)
+    try:
+        with path.open() as handle:
+            parsed.read_file(handle)
+    except FileNotFoundError:
+        return default_config(), "missing", f"not configured: {path}"
+    except (OSError, configparser.Error) as exc:
+        return default_config(), "invalid", f"invalid configuration {path}: {exc}"
+    if not parsed.has_section("nasberry"):
+        return default_config(), "invalid", f"configuration {path} is missing [nasberry]"
+    try:
+        validate_config_section(parsed["nasberry"], path)
+        loaded = merge_config_defaults(parsed)
+    except ConfigError as exc:
+        return default_config(), "invalid", f"invalid configuration {path}: {exc}"
+    return loaded, "valid", None
+
+
+def load_config(path):
+    return load_config_with_status(path)[0]
+
+
 state = {"running": True}
-config = load_config(CONFIG_FILE)
+config, CONFIG_STATUS, CONFIG_ERROR = load_config_with_status(CONFIG_FILE)
 settings = config["nasberry"]
+CONFIG_RUNTIME_ERROR = None
+
+
+def publish_config_from_disk():
+    global config, settings, CONFIG_STATUS, CONFIG_ERROR
+    config, CONFIG_STATUS, CONFIG_ERROR = load_config_with_status(CONFIG_FILE)
+    settings = config["nasberry"]
+    refresh_settings()
+    return config_ready()
 
 
 def setting(name, env_name=None):
     return os.environ.get(env_name or f"NASBERRY_{name.upper()}", settings.get(name, DEFAULTS[name]))
 
 
-def refresh_settings():
+def apply_default_runtime_settings():
     global DEVICE, MOUNT_POINT, SHARE_NAME, SHARE_USER, SAMBA_SERVICE, SAMBA_SERVICES, STATE_FILE, CHECK_DELAY, SAFE_MODE_ON_START
-    DEVICE = setting("device")
-    MOUNT_POINT = setting("mount_point")
-    SHARE_NAME = setting("share_name")
-    SHARE_USER = setting("share_user")
-    SAMBA_SERVICE = setting("samba_service")
-    SAMBA_SERVICES = [item.strip() for item in setting("samba_services").split(",") if item.strip()]
-    STATE_FILE = os.path.expanduser(setting("state_file"))
+    DEVICE = DEFAULTS["device"]
+    MOUNT_POINT = DEFAULTS["mount_point"]
+    SHARE_NAME = DEFAULTS["share_name"]
+    SHARE_USER = DEFAULTS["share_user"]
+    SAMBA_SERVICE = DEFAULTS["samba_service"]
+    SAMBA_SERVICES = [item.strip() for item in DEFAULTS["samba_services"].split(",") if item.strip()]
+    STATE_FILE = os.path.expanduser(DEFAULTS["state_file"])
+    CHECK_DELAY = parse_config_delay(DEFAULTS["check_delay"])
+    SAFE_MODE_ON_START = parse_config_bool(DEFAULTS["safe_mode_on_start"], "safe_mode_on_start")
+
+
+def refresh_settings():
+    global DEVICE, MOUNT_POINT, SHARE_NAME, SHARE_USER, SAMBA_SERVICE, SAMBA_SERVICES, STATE_FILE, CHECK_DELAY, SAFE_MODE_ON_START, CONFIG_RUNTIME_ERROR
     try:
-        CHECK_DELAY = max(0, int(setting("check_delay")))
-    except ValueError:
-        CHECK_DELAY = 2
-    SAFE_MODE_ON_START = setting("safe_mode_on_start").lower() in {"1", "true", "yes", "on"}
+        DEVICE = validate_path_value(setting("device"), "device")
+        MOUNT_POINT = validate_path_value(setting("mount_point"), "mount_point", absolute=True, reject_root=True)
+        SHARE_NAME = setting("share_name")
+        if has_control_character(SHARE_NAME):
+            raise ConfigError("invalid share_name value")
+        SHARE_USER = setting("share_user")
+        if SHARE_USER and not valid_share_user_value(SHARE_USER):
+            raise ConfigError("invalid share_user value")
+        SAMBA_SERVICE = setting("samba_service")
+        if not valid_service_token(SAMBA_SERVICE):
+            raise ConfigError("invalid samba_service value")
+        raw_services = setting("samba_services")
+        SAMBA_SERVICES = [item.strip() for item in raw_services.split(",") if item.strip()]
+        if not SAMBA_SERVICES or not all(valid_service_token(item) for item in SAMBA_SERVICES):
+            raise ConfigError("invalid samba_services value")
+        STATE_FILE = os.path.expanduser(validate_path_value(setting("state_file"), "state_file"))
+        CHECK_DELAY = parse_config_delay(setting("check_delay"))
+        SAFE_MODE_ON_START = parse_config_bool(setting("safe_mode_on_start"), "safe_mode_on_start")
+        CONFIG_RUNTIME_ERROR = None
+    except ConfigError as exc:
+        CONFIG_RUNTIME_ERROR = f"invalid runtime configuration override: {exc}"
+        apply_default_runtime_settings()
 
 
 refresh_settings()
@@ -100,6 +244,38 @@ def log(msg):
     elif msg.startswith("⚠"):
         msg = styled(msg, "1", "33")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+def config_ready():
+    return CONFIG_STATUS == "valid" and CONFIG_RUNTIME_ERROR is None
+
+
+def config_problem():
+    if CONFIG_RUNTIME_ERROR:
+        return CONFIG_RUNTIME_ERROR, "Inspect the NASBERRY_* environment overrides."
+    if CONFIG_STATUS == "missing":
+        return f"Nasberry has not been configured: {CONFIG_FILE}", "Run 'sudo nasberry setup'."
+    if CONFIG_STATUS == "invalid":
+        return CONFIG_ERROR or f"invalid configuration: {CONFIG_FILE}", f"Inspect or repair {CONFIG_FILE}."
+    return "configuration is valid", ""
+
+
+def require_valid_config(operation=None):
+    if config_ready():
+        return True
+    detail, fix = config_problem()
+    action = f" for {operation}" if operation else ""
+    log(f"✖ Configuration unavailable{action}: {detail}")
+    if fix:
+        log(f"  {fix}")
+    return False
+
+
+def configuration_check():
+    if config_ready():
+        return True, str(CONFIG_FILE), ""
+    detail, fix = config_problem()
+    return False, detail, fix
 
 
 def run(cmd, timeout=30):
@@ -942,43 +1118,53 @@ def doctor():
     app_path = str(Path(__file__).resolve())
     section_header("SYSTEM")
     results.append(check("Application version", True, f"v{APP_VERSION} at {app_path}", label_width=label_width))
-    results.append(check("Configuration", CONFIG_FILE.exists(), str(CONFIG_FILE), "Run 'sudo nasberry setup'.", label_width))
+    config_ok, config_detail, config_fix = configuration_check()
+    results.append(check("Configuration", config_ok, config_detail, config_fix, label_width))
     results.append(check("Privileges", os.geteuid() == 0 or command_exists("sudo"), "root/sudo available" if os.geteuid() == 0 or command_exists("sudo") else "sudo unavailable", "Run Nasberry as root.", label_width))
     for command in ("mount", "umount", "lsblk", "systemctl", "smbd", "testparm", "ip", "smbpasswd", "pdbedit"):
         results.append(check(f"Required command: {command}", command_exists(command), shutil.which(command) or "missing", "Re-run install.sh.", label_width))
     section_header("STORAGE")
-    results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'.", label_width))
-    results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}", label_width))
-    mount_state = storage_mount_state()
-    active = active_mount_point()
-    mount_details = {
-        "safely_unmounted": "safely unmounted",
-        "mounted_nas": f"mounted in NAS mode at {active}",
-        "mounted_elsewhere": f"mounted elsewhere at {active}; configured Nasberry mount point: {MOUNT_POINT}",
-    }
-    results.append(check("Mount state", True, mount_details[mount_state], label_width=label_width))
-    try:
-        shares = load_shares()
-        enabled = [share for share in shares if share.get("enabled", True)]
-        results.append(check("Share configuration", bool(enabled), f"{len(enabled)} enabled of {len(shares)} configured", "Run 'sudo nasberry shares'.", label_width))
-        for share in enabled:
-            share_ok, share_detail = share_folder_status(share)
-            results.append(check(f"[{share['name']}] folder", share_ok, share_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
-    except ShareConfigError as exc:
-        detail = str(exc)
-        fix = "Run 'sudo nasberry setup'." if "missing" in detail else f"Inspect or repair {SHARES_FILE}."
-        results.append(check("Share configuration", False, detail, fix, label_width))
-    for folder_name in ("Private", "Backups"):
-        protected_ok, protected_detail = protected_folder_status(folder_name)
-        results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it.", label_width))
+    if config_ok:
+        results.append(check("Storage device", device_exists(), DEVICE, "Connect the drive or run 'sudo nasberry setup'.", label_width))
+        results.append(check("Mount point", os.path.isdir(MOUNT_POINT), MOUNT_POINT, f"Create it with: sudo mkdir -p {MOUNT_POINT}", label_width))
+        mount_state = storage_mount_state()
+        active = active_mount_point()
+        mount_details = {
+            "safely_unmounted": "safely unmounted",
+            "mounted_nas": f"mounted in NAS mode at {active}",
+            "mounted_elsewhere": f"mounted elsewhere at {active}; configured Nasberry mount point: {MOUNT_POINT}",
+        }
+        results.append(check("Mount state", True, mount_details[mount_state], label_width=label_width))
+        try:
+            shares = load_shares()
+            enabled = [share for share in shares if share.get("enabled", True)]
+            results.append(check("Share configuration", bool(enabled), f"{len(enabled)} enabled of {len(shares)} configured", "Run 'sudo nasberry shares'.", label_width))
+            for share in enabled:
+                share_ok, share_detail = share_folder_status(share)
+                results.append(check(f"[{share['name']}] folder", share_ok, share_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
+        except ShareConfigError as exc:
+            detail = str(exc)
+            fix = "Run 'sudo nasberry setup'." if "missing" in detail else f"Inspect or repair {SHARES_FILE}."
+            results.append(check("Share configuration", False, detail, fix, label_width))
+        for folder_name in ("Private", "Backups"):
+            protected_ok, protected_detail = protected_folder_status(folder_name)
+            results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it.", label_width))
+    else:
+        results.append(check("Storage configuration", False, "not checked without valid configuration", config_fix, label_width))
     section_header("SAMBA")
-    results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup.", label_width))
-    valid, reason = samba_config_valid()
-    results.append(check("Samba shares", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it.", label_width))
-    account_ok, account_detail = samba_account_valid()
-    results.append(check("Samba account", account_ok, account_detail, f"Run 'sudo smbpasswd -a {SHARE_USER}' to create or reset it." if SHARE_USER else "Run 'sudo nasberry setup'.", label_width))
+    if config_ok:
+        results.append(check("Samba service", service_exists(SAMBA_SERVICE), SAMBA_SERVICE, "Install Samba or choose the correct service in setup.", label_width))
+        valid, reason = samba_config_valid()
+        results.append(check("Samba shares", valid, reason, "Run 'sudo nasberry repair-samba' to recreate it.", label_width))
+        account_ok, account_detail = samba_account_valid()
+        results.append(check("Samba account", account_ok, account_detail, f"Run 'sudo smbpasswd -a {SHARE_USER}' to create or reset it." if SHARE_USER else "Run 'sudo nasberry setup'.", label_width))
+    else:
+        results.append(check("Samba configuration", False, "not checked without valid configuration", config_fix, label_width))
     section_header("NETWORK")
-    print_connection_info()
+    if config_ok:
+        print_connection_info()
+    else:
+        print("Connection information: not checked without valid configuration")
     section_header("RESULT")
     passed = sum(results)
     symbol, color = ("✔", "32") if passed == len(results) else (("⚠", "33") if passed >= len(results) * 0.75 else ("✖", "31"))
@@ -1108,10 +1294,7 @@ def samba_config_preflight():
 
 
 def valid_share_user(share_user):
-    return bool(share_user) and not any(
-        character.isspace() or character in "[]#;=,"
-        for character in share_user
-    )
+    return valid_share_user_value(share_user)
 
 
 def setup_preflight(selected, share_user):
@@ -1276,6 +1459,10 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
     if os.geteuid() != 0:
         log("✖ Setup changes system files and must run as root: sudo nasberry setup")
         return False
+    if CONFIG_STATUS == "invalid" or CONFIG_RUNTIME_ERROR:
+        require_valid_config("setup")
+        log(f"Refusing to overwrite {CONFIG_FILE} automatically.")
+        return False
     selected = choose_device(non_interactive)
     if not selected:
         return False
@@ -1302,7 +1489,12 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
             return False
         settings["pin_hash"] = hash_pin(first)
     save_config()
-    refresh_settings()
+    if not publish_config_from_disk():
+        detail, fix = config_problem()
+        log(f"✖ Saved configuration could not be validated: {detail}")
+        if fix:
+            log(f"  {fix}")
+        return False
     ensure_default_shares_file()
     configured = mount_storage(repair_permissions=True) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
     password_updated = False
@@ -1413,6 +1605,17 @@ def menu_mount_status():
 
 
 def menu_status_lines():
+    if not config_ready():
+        detail, _fix = config_problem()
+        state_text = "○ not configured" if CONFIG_STATUS == "missing" and not CONFIG_RUNTIME_ERROR else "✖ configuration error"
+        return [
+            f"Configuration {state_text}",
+            fit_text(detail, terminal_width() - 4),
+            "Storage      not checked",
+            "Sharing      not checked",
+            "Setup        run setup" if CONFIG_STATUS == "missing" and not CONFIG_RUNTIME_ERROR else f"Config file  {CONFIG_FILE}",
+            "Diagnostics  available",
+        ]
     present = device_exists()
     mount_state, mount_location = menu_mount_status()
     sharing = service_active()
@@ -1564,6 +1767,13 @@ def banner():
 
 
 def status():
+    if not config_ready():
+        detail, fix = config_problem()
+        print(f"Configuration : {CONFIG_STATUS}")
+        print(f"Details       : {detail}")
+        if fix:
+            print(f"Next step     : {fix}")
+        return False
     print(f"Storage device : {DEVICE} ({'present' if device_exists() else 'missing'})")
     mount_point = active_mount_point()
     print(f"Mount state    : {storage_mount_state_label()}")
@@ -1581,6 +1791,13 @@ def status():
         print_connection_info()
 
 def storage_info():
+    if not config_ready():
+        detail, fix = config_problem()
+        print(f"Configuration       : {CONFIG_STATUS}")
+        print(f"Details             : {detail}")
+        if fix:
+            print(f"Next step           : {fix}")
+        return False
     active = active_mount_point()
     print(f"Storage device      : {DEVICE}")
     print(f"Device              : {'present' if device_exists() else 'missing'}")
@@ -1636,12 +1853,16 @@ def menu():
     clean_exit = False
     terminal = DashboardTerminal()
     status_cache = DashboardStatusCache()
+    config_dependent_actions = {"1", "2", "3", "4", "5", "8", "9"}
 
     def run_selected_action(key):
         label, action = actions[key]
         terminal.restore_normal_mode(flush_input=True)
         show_action_feedback(label, action_modes.get(key, "action"))
-        run_dashboard_action(action)
+        if key in config_dependent_actions and not require_valid_config(label):
+            pass
+        else:
+            run_dashboard_action(action)
         status_cache.invalidate()
         pause()
         clear()
@@ -1703,13 +1924,21 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if SAFE_MODE_ON_START:
+    if config_ready() and SAFE_MODE_ON_START:
         enforce_boot_safety()
+    def guarded(operation, action):
+        return require_valid_config(operation) and action()
     commands = {
-        "status": lambda: (status() or True), "storage": lambda: (storage_info() or True), "online": lambda: protected(start_share),
-        "offline": lambda: protected(lambda: stop_share() and unmount_storage()), "mount": mount_storage,
-        "unmount": unmount_storage, "lock": panic_lock, "doctor": doctor, "repair-samba": repair_samba_share,
-        "shares": manage_shares,
+        "status": lambda: (status() or True),
+        "storage": lambda: (storage_info() or True),
+        "online": lambda: guarded("start sharing", lambda: protected(start_share)),
+        "offline": lambda: guarded("stop sharing", lambda: protected(lambda: stop_share() and unmount_storage())),
+        "mount": lambda: guarded("mount storage", mount_storage),
+        "unmount": lambda: guarded("unmount storage", unmount_storage),
+        "lock": lambda: guarded("emergency lock", panic_lock),
+        "doctor": doctor,
+        "repair-samba": lambda: guarded("repair Samba", repair_samba_share),
+        "shares": lambda: guarded("manage shares", manage_shares),
     }
     if args.command == "setup":
         return setup(args.non_interactive, args.skip_pin, args.share_user)
@@ -1717,7 +1946,7 @@ def main():
         if not args.yes:
             log("Refusing to disable services without --yes")
             return False
-        return enforce_boot_safety()
+        return guarded("safe mode", enforce_boot_safety)
     if args.command in commands:
         return commands[args.command]()
     menu()
