@@ -324,7 +324,9 @@ class NasberryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             smb_file = Path(directory) / "smb.conf"
             smb_file.write_text("original config")
-            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
                 self.assertTrue(nasberrypi.configure_samba_share())
             self.assertIn("[Public]", smb_file.read_text())
             self.assertIn("original config", smb_file.read_text())
@@ -766,15 +768,43 @@ class NasberryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             smb_file = Path(directory) / "smb.conf"
             smb_file.write_text("original config")
-            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
                 self.assertFalse(nasberrypi.configure_samba_share())
             self.assertEqual(smb_file.read_text(), "original config")
 
+    @mock.patch.object(nasberrypi, "share_user_preflight")
     @mock.patch.object(nasberrypi, "samba_config_preflight")
-    def test_configure_samba_rejects_unsafe_user_before_preflight(self, preflight):
+    def test_configure_samba_rejects_unsafe_user_before_preflight(self, preflight, user_preflight):
         with mock.patch.object(nasberrypi, "SHARE_USER", "user\nadmin users = root"):
             self.assertFalse(nasberrypi.configure_samba_share())
+        user_preflight.assert_not_called()
         preflight.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "samba_config_valid")
+    @mock.patch.object(nasberrypi, "samba_config_preflight")
+    @mock.patch.object(nasberrypi, "appliance_samba_config")
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_refuses_missing_linux_user_before_modifying_samba(self, run, appliance, preflight, config_valid):
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text("original config")
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "deleteduser"), \
+                 mock.patch.object(nasberrypi.pwd, "getpwnam", side_effect=KeyError), \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.configure_samba_share())
+            self.assertEqual(smb_file.read_text(), "original config")
+            self.assertEqual(list(Path(directory).glob("smb.conf.nasberry.*.bak")), [])
+            self.assertEqual(list(Path(directory).glob(".smb.conf.nasberry.*")), [])
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Configured Linux user does not exist", rendered)
+        self.assertIn("sudo nasberry setup", rendered)
+        appliance.assert_not_called()
+        preflight.assert_not_called()
+        run.assert_not_called()
+        config_valid.assert_not_called()
 
     @mock.patch.object(nasberrypi, "samba_config_preflight")
     @mock.patch.object(nasberrypi, "load_shares", side_effect=nasberrypi.ShareConfigError("invalid shares"))
@@ -784,6 +814,7 @@ class NasberryTests(unittest.TestCase):
             smb_file.write_text("original config")
             with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
                  mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
                  mock.patch("builtins.print"):
                 self.assertFalse(nasberrypi.configure_samba_share())
             self.assertEqual(smb_file.read_text(), "original config")

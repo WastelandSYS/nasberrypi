@@ -1514,6 +1514,8 @@ def configure_samba_share():
     if not valid_share_user(SHARE_USER):
         log("✖ Refusing to create Samba configuration with an unsafe share user")
         return False
+    if not share_user_preflight(SHARE_USER):
+        return False
     try:
         managed_section = appliance_samba_config()
     except ShareConfigError as exc:
