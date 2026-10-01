@@ -576,6 +576,124 @@ class NasberryTests(unittest.TestCase):
             self.assertFalse(nasberrypi.cleanup_other_mounts(confirm=True))
         run.assert_called_once_with(nasberrypi.sudo_cmd("umount", "/media/foo"))
 
+    @mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "ready"))
+    @mock.patch.object(nasberrypi, "service_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "service_active", side_effect=[True, True])
+    @mock.patch.object(nasberrypi, "stop_share", return_value=True)
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "ensure_mount_point", return_value=True)
+    @mock.patch.object(nasberrypi, "cleanup_other_mounts", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "storage_mount_options", return_value=["-o", "uid=1000,gid=1000,umask=0002"])
+    @mock.patch.object(nasberrypi, "run")
+    def test_permission_remount_umount_failure_restores_previous_service_when_safe(
+        self, run, _options, _mounted, _nas_mount, _cleanup, _ensure, write_state, _stop, _active, _exists, _valid
+    ):
+        run.side_effect = [
+            mock.Mock(returncode=1, stderr="busy"),
+            mock.Mock(returncode=0, stderr=""),
+        ]
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.mount_storage(repair_permissions=True, confirm_external_move=True))
+        self.assertEqual(run.call_args_list[0].args[0], nasberrypi.sudo_cmd("umount", nasberrypi.MOUNT_POINT))
+        self.assertEqual(run.call_args_list[1].args[0], nasberrypi.sudo_cmd("systemctl", "start", nasberrypi.SAMBA_SERVICE))
+        write_state.assert_called_with(True, True)
+
+    @mock.patch.object(nasberrypi, "samba_config_valid", return_value=(False, "invalid"))
+    @mock.patch.object(nasberrypi, "service_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "service_active", side_effect=[True, False])
+    @mock.patch.object(nasberrypi, "stop_share", return_value=True)
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "ensure_mount_point", return_value=True)
+    @mock.patch.object(nasberrypi, "cleanup_other_mounts", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "storage_mount_options", return_value=["-o", "uid=1000,gid=1000,umask=0002"])
+    @mock.patch.object(nasberrypi, "run")
+    def test_permission_remount_umount_failure_does_not_restore_with_invalid_samba_config(
+        self, run, _options, _mounted, _nas_mount, _cleanup, _ensure, write_state, _stop, _active, _exists, _valid
+    ):
+        run.return_value = mock.Mock(returncode=1, stderr="busy")
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.mount_storage(repair_permissions=True, confirm_external_move=True))
+        run.assert_called_once_with(nasberrypi.sudo_cmd("umount", nasberrypi.MOUNT_POINT))
+        write_state.assert_called_with(True, False)
+
+    @mock.patch.object(nasberrypi, "run")
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "service_exists", return_value=False)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    def test_failed_remount_restoration_skips_missing_service(self, _nas_mount, _exists, _mounted, write_state, run):
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.restore_share_after_failed_remount(True))
+        run.assert_not_called()
+        write_state.assert_called_once_with(True, False)
+
+    @mock.patch.object(nasberrypi, "service_active", side_effect=[True, False, False])
+    @mock.patch.object(nasberrypi, "stop_share", return_value=True)
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "ensure_mount_point", return_value=True)
+    @mock.patch.object(nasberrypi, "cleanup_other_mounts", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", side_effect=[True, False, False])
+    @mock.patch.object(nasberrypi, "is_mounted", side_effect=[True, True, False, False])
+    @mock.patch.object(nasberrypi, "device_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "storage_mount_options", return_value=["-o", "uid=1000,gid=1000,umask=0002"])
+    @mock.patch.object(nasberrypi, "time")
+    @mock.patch.object(nasberrypi, "run")
+    def test_permission_remount_mount_failure_does_not_restore_without_safe_storage(
+        self, run, _time, _options, _device, _mounted, _nas_mount, _cleanup, _ensure, write_state, _stop, _active
+    ):
+        run.side_effect = [
+            mock.Mock(returncode=0, stderr="", stdout=""),
+            mock.Mock(returncode=1, stderr="mount failed", stdout=""),
+        ]
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.mount_storage(repair_permissions=True, confirm_external_move=True))
+        self.assertEqual(run.call_args_list[0].args[0], nasberrypi.sudo_cmd("umount", nasberrypi.MOUNT_POINT))
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            nasberrypi.sudo_cmd("mount", "-o", "uid=1000,gid=1000,umask=0002", nasberrypi.DEVICE, nasberrypi.MOUNT_POINT),
+        )
+        self.assertEqual(len(run.call_args_list), 2)
+        write_state.assert_called_with(False, False)
+
+    @mock.patch.object(nasberrypi, "service_active", return_value=False)
+    @mock.patch.object(nasberrypi, "stop_share")
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "ensure_mount_point", return_value=True)
+    @mock.patch.object(nasberrypi, "cleanup_other_mounts", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "storage_mount_options", return_value=["-o", "uid=1000,gid=1000,umask=0002"])
+    @mock.patch.object(nasberrypi, "run")
+    def test_inactive_service_before_remount_failure_is_not_started(
+        self, run, _options, _mounted, _nas_mount, _cleanup, _ensure, _write_state, stop_share, _active
+    ):
+        run.return_value = mock.Mock(returncode=1, stderr="busy")
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.mount_storage(repair_permissions=True, confirm_external_move=True))
+        stop_share.assert_not_called()
+        run.assert_called_once_with(nasberrypi.sudo_cmd("umount", nasberrypi.MOUNT_POINT))
+
+    @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "stop_share", return_value=False)
+    @mock.patch.object(nasberrypi, "restore_share_after_failed_remount")
+    @mock.patch.object(nasberrypi, "ensure_mount_point", return_value=True)
+    @mock.patch.object(nasberrypi, "cleanup_other_mounts", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "storage_mount_options", return_value=["-o", "uid=1000,gid=1000,umask=0002"])
+    @mock.patch.object(nasberrypi, "run")
+    def test_stop_share_failure_does_not_attempt_restoration(
+        self, run, _options, _mounted, _nas_mount, _cleanup, _ensure, restore, _stop, _active
+    ):
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.mount_storage(repair_permissions=True, confirm_external_move=True))
+        run.assert_not_called()
+        restore.assert_not_called()
+
     @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
     @mock.patch.object(nasberrypi, "run")
@@ -1749,6 +1867,26 @@ class NasberryTests(unittest.TestCase):
         ]}"""
         self.assertEqual([item["path"] for item in nasberrypi.lsblk_devices()], ["/dev/sda1"])
 
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "service_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "run", return_value=mock.Mock(returncode=0, stderr=""))
+    def test_restart_samba_service_synchronizes_active_state(self, run, _exists, _active, _mounted, write_state):
+        self.assertTrue(nasberrypi.restart_samba_service())
+        run.assert_called_once_with(nasberrypi.sudo_cmd("systemctl", "restart", nasberrypi.SAMBA_SERVICE))
+        write_state.assert_called_once_with(True, True)
+
+    @mock.patch.object(nasberrypi, "write_state")
+    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
+    @mock.patch.object(nasberrypi, "service_active", return_value=False)
+    @mock.patch.object(nasberrypi, "service_exists", return_value=True)
+    @mock.patch.object(nasberrypi, "run", return_value=mock.Mock(returncode=1, stderr="failed"))
+    def test_restart_samba_service_synchronizes_failed_state(self, _run, _exists, _active, _mounted, write_state):
+        with mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.restart_samba_service())
+        write_state.assert_called_once_with(True, False)
+
     @mock.patch.object(nasberrypi, "restart_samba_service", return_value=True)
     @mock.patch.object(nasberrypi, "configure_samba_share", return_value=True)
     @mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True)
@@ -1767,6 +1905,7 @@ class NasberryTests(unittest.TestCase):
         configure.assert_called_once_with()
         restart.assert_called_once_with()
 
+    @mock.patch.object(nasberrypi, "service_active", return_value=False)
     @mock.patch.object(nasberrypi, "restart_samba_service")
     @mock.patch.object(nasberrypi, "configure_samba_share")
     @mock.patch.object(nasberrypi, "ensure_share_folders", return_value=False)
@@ -1775,11 +1914,27 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "mount_storage", return_value=True)
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_repair_samba_share_fails_cleanly_when_share_folders_fail(
-        self, _geteuid, _mount_storage, _ensure_layout, _preflight, _ensure_shares, configure, restart
+        self, _geteuid, _mount_storage, _ensure_layout, _preflight, _ensure_shares, configure, restart, _active
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
         configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "service_active", return_value=False)
+    @mock.patch.object(nasberrypi, "restart_samba_service")
+    @mock.patch.object(nasberrypi, "configure_samba_share", return_value=False)
+    @mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True)
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True)
+    @mock.patch.object(nasberrypi, "mount_storage", return_value=True)
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_share_leaves_sharing_offline_when_configure_fails(
+        self, _geteuid, _mount_storage, _ensure_layout, _preflight, _ensure_shares, configure, restart, _active
+    ):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.repair_samba_share())
+        configure.assert_called_once_with()
         restart.assert_not_called()
 
     @mock.patch.object(nasberrypi, "restart_samba_service")

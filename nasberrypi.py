@@ -480,6 +480,7 @@ def cleanup_other_mounts(confirm=True):
 
 def mount_storage(repair_permissions=False, confirm_external_move=True):
     operation_header("MOUNT STORAGE", "Preparing storage for NAS access")
+    stopped_share_for_repair = False
     if not ensure_mount_point():
         write_state(is_mounted(), service_active())
         return False
@@ -493,12 +494,15 @@ def mount_storage(repair_permissions=False, confirm_external_move=True):
         return False
     options = storage_mount_options()
     if is_mounted() and repair_permissions and options:
-        if service_active() and not stop_share():
-            log("✖ Could not stop sharing before repairing storage permissions")
-            return False
+        if service_active():
+            if not stop_share():
+                log("✖ Could not stop sharing before repairing storage permissions")
+                return False
+            stopped_share_for_repair = True
         result = run(sudo_cmd("umount", MOUNT_POINT))
         if result.returncode != 0:
             log(f"✖ Could not remount storage: {result.stderr.strip() or 'device may be busy'}")
+            restore_share_after_failed_remount(stopped_share_for_repair)
             return False
     if is_mounted():
         log("✔ Storage is already mounted in NAS mode")
@@ -520,7 +524,10 @@ def mount_storage(repair_permissions=False, confirm_external_move=True):
         detail = result.stderr.strip() or result.stdout.strip() or "unknown mount error"
         log(f"✖ Mount failed: {detail}")
         log("Run 'nasberry doctor' for suggested fixes.")
-    write_state(mounted, service_active())
+        if stopped_share_for_repair:
+            restore_share_after_failed_remount(stopped_share_for_repair)
+    actual_mounted = device_mounted_at_nas() if stopped_share_for_repair else mounted
+    write_state(actual_mounted, service_active())
     return mounted
 
 
@@ -1364,12 +1371,42 @@ def setup_preflight(selected, share_user):
 def restart_samba_service():
     if not service_exists(SAMBA_SERVICE):
         log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. On Raspberry Pi OS/Debian, install the samba package and run 'sudo nasberry doctor'.")
+        write_state(is_mounted(), False)
         return False
     result = run(sudo_cmd("systemctl", "restart", SAMBA_SERVICE))
-    if result.returncode != 0:
+    active = result.returncode == 0 and service_active()
+    if not active:
         log(f"✖ Samba restart failed: {result.stderr.strip()}")
+        write_state(is_mounted(), service_active())
         return False
+    write_state(is_mounted(), active)
     return True
+
+
+def restore_share_after_failed_remount(stopped_by_operation):
+    if not stopped_by_operation:
+        return False
+    if not device_mounted_at_nas():
+        log("⚠ Previous sharing service was not restored because storage is not mounted in NAS mode")
+        write_state(is_mounted(), service_active())
+        return False
+    if not service_exists(SAMBA_SERVICE):
+        log(f"⚠ Previous sharing service could not be restored because '{SAMBA_SERVICE}' was not found")
+        write_state(is_mounted(), False)
+        return False
+    valid, reason = samba_config_valid()
+    if not valid:
+        log(f"⚠ Previous sharing service was not restored because Samba configuration is not safe: {reason}")
+        write_state(is_mounted(), service_active())
+        return False
+    result = run(sudo_cmd("systemctl", "start", SAMBA_SERVICE))
+    active = result.returncode == 0 and service_active()
+    if active:
+        log("✔ Previous sharing service restored")
+    else:
+        log(f"⚠ Previous sharing service could not be restored: {result.stderr.strip() or 'check systemctl status'}")
+    write_state(is_mounted(), active)
+    return active
 
 
 def repair_samba_share():
@@ -1385,8 +1422,13 @@ def repair_samba_share():
         return False
     if not samba_config_preflight():
         return False
-    if not mount_storage(repair_permissions=True, confirm_external_move=True) or not ensure_storage_layout() or not ensure_share_folders() or not configure_samba_share():
+    if not mount_storage(repair_permissions=True, confirm_external_move=True):
         log("✖ Samba repair failed. Review the validation error above.")
+        return False
+    if not ensure_storage_layout() or not ensure_share_folders() or not configure_samba_share():
+        log("✖ Samba repair failed. Review the validation error above.")
+        if not service_active():
+            log("⚠ File sharing remains offline because the repair did not complete safely.")
         return False
     if not restart_samba_service():
         return False
