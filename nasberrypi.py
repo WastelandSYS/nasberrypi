@@ -654,7 +654,7 @@ def load_share_bool(item, index, field, default):
     raise ShareConfigError(f"share {index}: {field} must be a boolean")
 
 
-def load_shares():
+def load_shares(check_filesystem=True):
     try:
         text = SHARES_FILE.read_text()
     except FileNotFoundError as exc:
@@ -687,7 +687,7 @@ def load_shares():
             "enabled": load_share_bool(item, index, "enabled", True),
             "read_only": load_share_bool(item, index, "read_only", False),
         }
-        ok, reason = validate_share(share, shares)
+        ok, reason = validate_share(share, shares, check_filesystem=check_filesystem)
         if not ok:
             raise ShareConfigError(f"share {index}: {reason}")
         shares.append(share)
@@ -721,7 +721,7 @@ def share_path_from_input(value):
     return os.path.normpath(value if os.path.isabs(value) else os.path.join(MOUNT_POINT, value))
 
 
-def validate_share(share, existing=None):
+def validate_share(share, existing=None, check_filesystem=True):
     name = str(share.get("name", "")).strip()
     if not name:
         return False, "share name cannot be empty"
@@ -733,20 +733,32 @@ def validate_share(share, existing=None):
     existing = existing or []
     if any(item["name"].lower() == name.lower() for item in existing):
         return False, f"duplicate share name: {name}"
-    path = share_path_from_input(raw_path)
-    mount = Path(MOUNT_POINT).resolve(strict=False)
-    absolute = Path(path).resolve(strict=False)
-    if absolute == mount or mount not in absolute.parents:
-        return False, f"share path must be under {MOUNT_POINT}"
     if ".." in Path(str(share.get("path", ""))).parts:
         return False, "share path must not contain .."
-    current = mount
-    for part in absolute.relative_to(mount).parts:
-        current = current / part
-        if current.exists() and current.is_symlink():
-            return False, "share path must not pass through a symbolic link"
+    path = share_path_from_input(raw_path)
+    if check_filesystem:
+        mount = Path(MOUNT_POINT).resolve(strict=False)
+        absolute = Path(path).resolve(strict=False)
+        if absolute == mount or mount not in absolute.parents:
+            return False, f"share path must be under {MOUNT_POINT}"
+        current = mount
+        for part in absolute.relative_to(mount).parts:
+            current = current / part
+            if current.exists() and current.is_symlink():
+                return False, "share path must not pass through a symbolic link"
+        normalized_path = str(absolute)
+    else:
+        mount = os.path.abspath(os.path.normpath(MOUNT_POINT))
+        absolute = os.path.abspath(os.path.normpath(path))
+        try:
+            common = os.path.commonpath([mount, absolute])
+        except ValueError:
+            return False, f"share path must be under {MOUNT_POINT}"
+        if absolute == mount or common != mount:
+            return False, f"share path must be under {MOUNT_POINT}"
+        normalized_path = absolute
     share["name"] = name
-    share["path"] = str(absolute)
+    share["path"] = normalized_path
     return True, "ok"
 
 
@@ -1313,6 +1325,15 @@ def samba_config_preflight():
     return True
 
 
+def share_config_preflight():
+    try:
+        load_shares(check_filesystem=False)
+        return True
+    except ShareConfigError as exc:
+        log(f"✖ Share configuration error: {exc}")
+        return False
+
+
 def valid_share_user(share_user):
     return valid_share_user_value(share_user)
 
@@ -1419,6 +1440,8 @@ def repair_samba_share():
         return False
     if not valid_share_user(SHARE_USER):
         log("✖ Configured Samba user contains unsupported characters. Run 'sudo nasberry setup' again.")
+        return False
+    if not share_config_preflight():
         return False
     if not samba_config_preflight():
         return False

@@ -467,6 +467,38 @@ class NasberryTests(unittest.TestCase):
                     with self.assertRaisesRegex(nasberrypi.ShareConfigError, pattern):
                         nasberrypi.load_shares()
 
+    def test_share_config_preflight_ignores_underlying_mount_point_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            mount = Path(directory) / "nasberry"
+            mount.mkdir()
+            (mount / "Media").symlink_to(outside, target_is_directory=True)
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text('{"shares": [{"name": "Media", "path": "Media"}]}')
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", str(mount)), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                self.assertTrue(nasberrypi.share_config_preflight())
+                with self.assertRaisesRegex(nasberrypi.ShareConfigError, "under"):
+                    nasberrypi.load_shares()
+
+    def test_structural_share_validation_uses_lexical_path_containment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount = Path(directory) / "nasberry"
+            sibling = Path(directory) / "nasberry2"
+            mount.mkdir()
+            sibling.mkdir()
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", str(mount)):
+                accepted = ("Media", str(mount / "Media"))
+                rejected = ("../Media", "/srv/Media", str(sibling / "Media"))
+                for value in accepted:
+                    share = {"name": "Media", "path": value}
+                    ok, reason = nasberrypi.validate_share(share, check_filesystem=False)
+                    self.assertTrue(ok, reason)
+                    self.assertEqual(share["path"], os.path.abspath(os.path.normpath(share["path"])))
+                for value in rejected:
+                    ok, reason = nasberrypi.validate_share({"name": "Media", "path": value}, check_filesystem=False)
+                    self.assertFalse(ok, value)
+                    self.assertIn("under" if value != "../Media" else "..", reason)
+
     def test_load_shares_preserves_empty_and_all_disabled_configurations(self):
         with tempfile.TemporaryDirectory() as directory:
             shares_file = Path(directory) / "shares.json"
@@ -489,6 +521,35 @@ class NasberryTests(unittest.TestCase):
                 shares_file.write_text("{broken")
                 nasberrypi.ensure_default_shares_file()
                 self.assertEqual(shares_file.read_text(), "{broken")
+
+    def test_share_config_preflight_reports_missing_without_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.share_config_preflight())
+            rendered = "\n".join(call.args[0] for call in output.call_args_list)
+            self.assertIn("Share configuration error", rendered)
+            self.assertIn("missing", rendered)
+            self.assertFalse(shares_file.exists())
+
+    def test_share_config_preflight_reports_invalid_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text("{broken")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.share_config_preflight())
+            rendered = "\n".join(call.args[0] for call in output.call_args_list)
+            self.assertIn("Share configuration error", rendered)
+            self.assertIn("invalid JSON", rendered)
+
+    def test_share_config_preflight_accepts_empty_and_all_disabled_configurations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                shares_file.write_text('{"shares": []}')
+                self.assertTrue(nasberrypi.share_config_preflight())
+                shares_file.write_text('{"shares": [{"name": "Media", "path": "Media", "enabled": false}]}')
+                self.assertTrue(nasberrypi.share_config_preflight())
 
     @mock.patch.object(nasberrypi, "mount_storage")
     @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
@@ -1867,6 +1928,68 @@ class NasberryTests(unittest.TestCase):
         ]}"""
         self.assertEqual([item["path"] for item in nasberrypi.lsblk_devices()], ["/dev/sda1"])
 
+    @mock.patch.object(nasberrypi, "restart_samba_service")
+    @mock.patch.object(nasberrypi, "configure_samba_share")
+    @mock.patch.object(nasberrypi, "ensure_share_folders")
+    @mock.patch.object(nasberrypi, "ensure_storage_layout")
+    @mock.patch.object(nasberrypi, "mount_storage")
+    @mock.patch.object(nasberrypi, "samba_config_preflight")
+    @mock.patch.object(nasberrypi, "load_shares", side_effect=nasberrypi.ShareConfigError("invalid shares"))
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_share_preflights_shares_before_side_effects(
+        self, _geteuid, _load_shares, samba_preflight, mount_storage, ensure_layout, ensure_shares, configure, restart
+    ):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print") as output:
+            self.assertFalse(nasberrypi.repair_samba_share())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Share configuration error: invalid shares", rendered)
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "restart_samba_service")
+    @mock.patch.object(nasberrypi, "configure_samba_share")
+    @mock.patch.object(nasberrypi, "ensure_share_folders")
+    @mock.patch.object(nasberrypi, "ensure_storage_layout")
+    @mock.patch.object(nasberrypi, "mount_storage")
+    @mock.patch.object(nasberrypi, "samba_config_preflight")
+    @mock.patch.object(nasberrypi, "share_config_preflight", return_value=False)
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_share_config_failure_blocks_external_relocation_path(
+        self, _geteuid, _share_preflight, samba_preflight, mount_storage, ensure_layout, ensure_shares, configure, restart
+    ):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.repair_samba_share())
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "restart_samba_service")
+    @mock.patch.object(nasberrypi, "configure_samba_share")
+    @mock.patch.object(nasberrypi, "ensure_share_folders")
+    @mock.patch.object(nasberrypi, "ensure_storage_layout")
+    @mock.patch.object(nasberrypi, "mount_storage")
+    @mock.patch.object(nasberrypi, "samba_config_preflight")
+    @mock.patch.object(nasberrypi, "share_config_preflight", return_value=False)
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_share_config_failure_blocks_active_samba_remount_path(
+        self, _geteuid, _share_preflight, samba_preflight, mount_storage, ensure_layout, ensure_shares, configure, restart
+    ):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.repair_samba_share())
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
     @mock.patch.object(nasberrypi, "write_state")
     @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
     @mock.patch.object(nasberrypi, "service_active", return_value=True)
@@ -1887,18 +2010,28 @@ class NasberryTests(unittest.TestCase):
             self.assertFalse(nasberrypi.restart_samba_service())
         write_state.assert_called_once_with(True, False)
 
-    @mock.patch.object(nasberrypi, "restart_samba_service", return_value=True)
-    @mock.patch.object(nasberrypi, "configure_samba_share", return_value=True)
-    @mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True)
-    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
-    @mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True)
-    @mock.patch.object(nasberrypi, "mount_storage", return_value=True)
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
-    def test_repair_samba_share_mounts_repairs_and_restarts(
-        self, _geteuid, mount_storage, ensure_layout, _preflight, ensure_shares, configure, restart
-    ):
-        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
+    def test_repair_samba_share_mounts_repairs_and_restarts(self, _geteuid):
+        calls = []
+
+        def step(name):
+            def _inner(*_args, **_kwargs):
+                calls.append(name)
+                return True
+            return _inner
+
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+             mock.patch.object(nasberrypi, "share_config_preflight", side_effect=step("share_preflight")) as share_preflight, \
+             mock.patch.object(nasberrypi, "samba_config_preflight", side_effect=step("samba_preflight")) as samba_preflight, \
+             mock.patch.object(nasberrypi, "mount_storage", side_effect=step("mount")) as mount_storage, \
+             mock.patch.object(nasberrypi, "ensure_storage_layout", side_effect=step("layout")) as ensure_layout, \
+             mock.patch.object(nasberrypi, "ensure_share_folders", side_effect=step("folders")) as ensure_shares, \
+             mock.patch.object(nasberrypi, "configure_samba_share", side_effect=step("configure")) as configure, \
+             mock.patch.object(nasberrypi, "restart_samba_service", side_effect=step("restart")) as restart:
             self.assertTrue(nasberrypi.repair_samba_share())
+        self.assertEqual(calls, ["share_preflight", "samba_preflight", "mount", "layout", "folders", "configure", "restart"])
+        share_preflight.assert_called_once_with()
+        samba_preflight.assert_called_once_with()
         mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=True)
         ensure_layout.assert_called_once_with()
         ensure_shares.assert_called_once_with()
@@ -1916,7 +2049,9 @@ class NasberryTests(unittest.TestCase):
     def test_repair_samba_share_fails_cleanly_when_share_folders_fail(
         self, _geteuid, _mount_storage, _ensure_layout, _preflight, _ensure_shares, configure, restart, _active
     ):
-        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+             mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
+             mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
         configure.assert_not_called()
         restart.assert_not_called()
@@ -1932,7 +2067,9 @@ class NasberryTests(unittest.TestCase):
     def test_repair_samba_share_leaves_sharing_offline_when_configure_fails(
         self, _geteuid, _mount_storage, _ensure_layout, _preflight, _ensure_shares, configure, restart, _active
     ):
-        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+             mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
+             mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
         configure.assert_called_once_with()
         restart.assert_not_called()
@@ -1947,7 +2084,9 @@ class NasberryTests(unittest.TestCase):
     def test_repair_samba_declined_external_move_stops_later_work(
         self, _geteuid, _preflight, mount_storage, ensure_layout, ensure_shares, configure, restart
     ):
-        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), mock.patch("builtins.print"):
+        with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+             mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
+             mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
         mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=True)
         ensure_layout.assert_not_called()
