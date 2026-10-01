@@ -695,7 +695,7 @@ def load_shares(check_filesystem=True):
 
 
 def ensure_default_shares_file():
-    if not SHARES_FILE.exists():
+    if not os.path.lexists(SHARES_FILE):
         save_shares([default_share()])
 
 
@@ -1336,6 +1336,15 @@ def share_config_preflight():
         return False
 
 
+def setup_share_config_preflight():
+    if not os.path.lexists(SHARES_FILE):
+        return True
+    if share_config_preflight():
+        return True
+    log(f"Inspect or repair {SHARES_FILE}; Setup will not overwrite it automatically.")
+    return False
+
+
 def valid_share_user(share_user):
     return valid_share_user_value(share_user)
 
@@ -1574,6 +1583,8 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
     print_filesystem_guidance(selected.get("fstype"))
     if not setup_preflight(selected, share_user):
         return False
+    if not setup_share_config_preflight():
+        return False
     settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}"
     settings["mount_point"] = MOUNT_POINT
     settings["share_name"] = "Public"
@@ -1596,6 +1607,8 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
             log(f"  {fix}")
         return False
     ensure_default_shares_file()
+    if not share_config_preflight():
+        return False
     configured = mount_storage(repair_permissions=True, confirm_external_move=False) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
     password_updated = False
     if configured and settings.get("share_user") and not non_interactive and command_exists("smbpasswd"):

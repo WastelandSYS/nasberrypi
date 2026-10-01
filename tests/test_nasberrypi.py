@@ -517,12 +517,90 @@ class NasberryTests(unittest.TestCase):
     def test_ensure_default_shares_file_bootstraps_only_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
             shares_file = Path(directory) / "shares.json"
+            dangling = Path(directory) / "dangling-shares.json"
+            dangling.symlink_to(Path(directory) / "missing-target.json")
             with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
                 nasberrypi.ensure_default_shares_file()
                 self.assertIn("Public", shares_file.read_text())
                 shares_file.write_text("{broken")
                 nasberrypi.ensure_default_shares_file()
                 self.assertEqual(shares_file.read_text(), "{broken")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", dangling):
+                nasberrypi.ensure_default_shares_file()
+                self.assertTrue(dangling.is_symlink())
+                self.assertFalse(dangling.exists())
+
+    def test_setup_share_config_preflight_allows_genuinely_missing_file_without_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                self.assertTrue(nasberrypi.setup_share_config_preflight())
+                self.assertFalse(shares_file.exists())
+
+    def test_setup_share_config_preflight_preserves_valid_custom_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            original = '{\n  "shares": [{"name": "Media", "path": "Media"}]\n}\n'
+            shares_file.write_text(original)
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                self.assertTrue(nasberrypi.setup_share_config_preflight())
+                self.assertEqual(shares_file.read_text(), original)
+
+    def test_setup_share_config_preflight_reports_invalid_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text("{broken")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.setup_share_config_preflight())
+            rendered = "\n".join(call.args[0] for call in output.call_args_list)
+            self.assertIn("Share configuration error", rendered)
+            self.assertIn("invalid JSON", rendered)
+            self.assertIn("will not overwrite", rendered)
+            self.assertEqual(shares_file.read_text(), "{broken")
+
+    def test_setup_share_config_preflight_accepts_empty_and_all_disabled_configurations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                shares_file.write_text('{"shares": []}')
+                self.assertTrue(nasberrypi.setup_share_config_preflight())
+                shares_file.write_text('{"shares": [{"name": "Media", "path": "Media", "enabled": false}]}')
+                self.assertTrue(nasberrypi.setup_share_config_preflight())
+
+    def test_setup_share_config_preflight_ignores_underlying_mount_point_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            mount = Path(directory) / "nasberry"
+            mount.mkdir()
+            (mount / "Media").symlink_to(outside, target_is_directory=True)
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text('{"shares": [{"name": "Media", "path": "Media"}]}')
+            with mock.patch.object(nasberrypi, "MOUNT_POINT", str(mount)), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                self.assertTrue(nasberrypi.setup_share_config_preflight())
+
+    def test_setup_share_config_preflight_rejects_dangling_symlink_without_replacing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.symlink_to(Path(directory) / "missing-target.json")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.setup_share_config_preflight())
+            rendered = "\n".join(call.args[0] for call in output.call_args_list)
+            self.assertIn("Share configuration error", rendered)
+            self.assertTrue(shares_file.is_symlink())
+            self.assertFalse(shares_file.exists())
+
+    def test_setup_share_config_preflight_reports_directory_and_unreadable_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.mkdir()
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), mock.patch("builtins.print"):
+                self.assertFalse(nasberrypi.setup_share_config_preflight())
+            shares_file.rmdir()
+            shares_file.write_text("{}")
+            with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch("builtins.print"):
+                self.assertFalse(nasberrypi.setup_share_config_preflight())
 
     def test_share_config_preflight_reports_missing_without_bootstrap(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2379,12 +2457,63 @@ class NasberryTests(unittest.TestCase):
         choose_device.assert_called_once_with(False)
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_refuses_corrupt_existing_shares_before_mutating_config_or_storage(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        settings = config["nasberry"]
+        settings["device"] = "/dev/old"
+        settings["mount_point"] = "/mnt/old"
+        settings["share_name"] = "Old"
+        settings["share_user"] = "olduser"
+        settings["pin_hash"] = "old-pin"
+        original_settings = dict(settings)
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text("{broken")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", settings), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", None), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "save_config") as save_config, \
+                 mock.patch.object(nasberrypi, "publish_config_from_disk") as publish, \
+                 mock.patch.object(nasberrypi, "ensure_default_shares_file") as ensure_default, \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_storage_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_share_folders, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure_samba, \
+                 mock.patch.object(nasberrypi, "restart_samba_service") as restart, \
+                 mock.patch.object(nasberrypi.getpass, "getpass") as pin_prompt, \
+                 mock.patch("builtins.input", return_value="sparkles"), \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.setup(non_interactive=False, skip_pin=False))
+            rendered = "\n".join(call.args[0] for call in output.call_args_list)
+            self.assertIn("Share configuration error", rendered)
+            self.assertIn("will not overwrite", rendered)
+            self.assertEqual(shares_file.read_text(), "{broken")
+            self.assertEqual(dict(settings), original_settings)
+        pin_prompt.assert_not_called()
+        save_config.assert_not_called()
+        publish.assert_not_called()
+        ensure_default.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_storage_layout.assert_not_called()
+        ensure_share_folders.assert_not_called()
+        configure_samba.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_successful_first_time_setup_publishes_valid_config_state(self, _geteuid):
         selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
         config = nasberrypi.default_config()
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
+            shares_file = Path(directory) / "shares.json"
             with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
                  mock.patch.object(nasberrypi, "config", config), \
                  mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
                  mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
@@ -2393,7 +2522,6 @@ class NasberryTests(unittest.TestCase):
                  mock.patch.object(nasberrypi, "MOUNT_POINT", "/srv/nasberry-test"), \
                  mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
                  mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
-                 mock.patch.object(nasberrypi, "ensure_default_shares_file"), \
                  mock.patch.object(nasberrypi, "mount_storage", return_value=True) as mount_storage, \
                  mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True), \
                  mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True), \
@@ -2409,7 +2537,109 @@ class NasberryTests(unittest.TestCase):
                 self.assertEqual(nasberrypi.settings["mount_point"], "/srv/nasberry-test")
                 self.assertEqual(nasberrypi.MOUNT_POINT, "/srv/nasberry-test")
                 self.assertEqual(nasberrypi.settings["share_user"], "sparkles")
+                self.assertIn("Public", shares_file.read_text())
         mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=False)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_preserves_existing_valid_custom_shares(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        custom = '{\n  "shares": [{"name": "Media", "path": "Media", "read_only": true}]\n}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text(custom)
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", None), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "MOUNT_POINT", "/srv/nasberry-test"), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "mount_storage", return_value=True) as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True), \
+                 mock.patch.object(nasberrypi, "configure_samba_share", return_value=True), \
+                 mock.patch.object(nasberrypi, "restart_samba_service", return_value=True), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
+            self.assertEqual(shares_file.read_text(), custom)
+        mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=False)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_bootstraps_missing_shares_then_validates_before_mounting(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        events = []
+
+        def bootstrap():
+            events.append("bootstrap")
+
+        def validate():
+            events.append("validate")
+            return True
+
+        def mount(*_args, **_kwargs):
+            events.append("mount")
+            return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", f"not configured: {config_file}"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_default_shares_file", side_effect=bootstrap), \
+                 mock.patch.object(nasberrypi, "share_config_preflight", side_effect=validate), \
+                 mock.patch.object(nasberrypi, "mount_storage", side_effect=mount), \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True), \
+                 mock.patch.object(nasberrypi, "configure_samba_share", return_value=True), \
+                 mock.patch.object(nasberrypi, "restart_samba_service", return_value=True), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
+        self.assertEqual(events, ["bootstrap", "validate", "mount"])
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_setup_stops_before_mount_when_second_share_validation_fails(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+
+        def write_broken_shares():
+            nasberrypi.SHARES_FILE.write_text("{broken")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            shares_file = Path(directory) / "shares.json"
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "config", config), \
+                 mock.patch.object(nasberrypi, "settings", config["nasberry"]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
+                 mock.patch.object(nasberrypi, "CONFIG_ERROR", f"not configured: {config_file}"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "choose_device", return_value=selected), \
+                 mock.patch.object(nasberrypi, "setup_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_default_shares_file", side_effect=write_broken_shares), \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_storage_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_share_folders, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure_samba, \
+                 mock.patch("builtins.print"):
+                self.assertFalse(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
+        mount_storage.assert_not_called()
+        ensure_storage_layout.assert_not_called()
+        ensure_share_folders.assert_not_called()
+        configure_samba.assert_not_called()
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_setup_stops_if_saved_config_cannot_be_reloaded(self, _geteuid):
