@@ -886,6 +886,8 @@ def start_share():
         log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. Run 'nasberry doctor'.")
         write_state(is_mounted(), False)
         return False
+    if not share_user_preflight(SHARE_USER):
+        return False
     if not device_mounted_at_nas() and not mount_storage():
         log("✖ Refusing to start sharing without mounted storage")
         return False
@@ -1338,6 +1340,22 @@ def valid_share_user(share_user):
     return valid_share_user_value(share_user)
 
 
+def share_user_exists(share_user):
+    try:
+        pwd.getpwnam(share_user)
+        return True
+    except (KeyError, TypeError):
+        return False
+
+
+def share_user_preflight(share_user):
+    if share_user_exists(share_user):
+        return True
+    log(f"✖ Configured Linux user does not exist: {share_user!r}")
+    log("Run 'sudo nasberry setup' to select a valid share user.")
+    return False
+
+
 def setup_preflight(selected, share_user):
     failures = []
     if os.geteuid() != 0:
@@ -1440,6 +1458,8 @@ def repair_samba_share():
         return False
     if not valid_share_user(SHARE_USER):
         log("✖ Configured Samba user contains unsupported characters. Run 'sudo nasberry setup' again.")
+        return False
+    if not share_user_preflight(SHARE_USER):
         return False
     if not share_config_preflight():
         return False
