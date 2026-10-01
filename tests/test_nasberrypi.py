@@ -12,6 +12,29 @@ SPEC.loader.exec_module(nasberrypi)
 
 
 class NasberryTests(unittest.TestCase):
+    def dashboard_actions(self):
+        return {
+            "1": ("Start sharing files", None),
+            "2": ("Stop sharing files", None),
+            "3": ("Connect storage drive", None),
+            "4": ("Safely eject storage drive", None),
+            "5": ("Emergency lock", None),
+            "6": ("Diagnostics", None),
+            "7": ("Setup / change drive", None),
+            "8": ("Repair Samba share", None),
+            "9": ("Manage shared folders", None),
+        }
+
+    def dashboard_status_lines(self):
+        return [
+            "Storage      ● present   ● mounted in NAS mode",
+            "Sharing      ● sharing online   1 enabled share(s)",
+            "Mount point  /mnt/nasberry",
+            "Share user   nasberry",
+            "Share mode   Multiple shared folders",
+            "Space        10.0G free / 20.0G",
+        ]
+
     def test_load_config_ignores_malformed_file_and_preserves_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
@@ -205,8 +228,8 @@ class NasberryTests(unittest.TestCase):
         preflight.assert_not_called()
 
     @mock.patch.object(nasberrypi, "filesystem_uses_mount_permissions", return_value=False)
-    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
-    def test_storage_layout_creates_and_protects_posix_folders(self, _is_mounted, _mount_permissions):
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    def test_storage_layout_creates_and_protects_posix_folders(self, _nas_mount, _mount_permissions):
         with tempfile.TemporaryDirectory() as directory:
             private_file = Path(directory) / "Private" / "keep.txt"
             private_file.parent.mkdir()
@@ -220,8 +243,8 @@ class NasberryTests(unittest.TestCase):
             self.assertEqual(private_file.read_text(), "preserve me")
 
     @mock.patch.object(nasberrypi, "filesystem_uses_mount_permissions", return_value=False)
-    @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
-    def test_storage_layout_rejects_symlink_without_touching_target(self, _is_mounted, _mount_permissions):
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
+    def test_storage_layout_rejects_symlink_without_touching_target(self, _nas_mount, _mount_permissions):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as target:
             (Path(directory) / "Private").symlink_to(target, target_is_directory=True)
             owner = mock.Mock(pw_uid=Path(directory).stat().st_uid, pw_gid=Path(directory).stat().st_gid)
@@ -384,6 +407,138 @@ class NasberryTests(unittest.TestCase):
             nasberrypi.show_action_feedback("Setup / change drive", "prompt")
         self.assertEqual(output.call_count, 1)
 
+    def test_draw_screen_tty_clears_home_and_does_not_append_newline(self):
+        class Output:
+            def __init__(self):
+                self.writes = []
+                self.flushed = False
+
+            def isatty(self):
+                return True
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                self.flushed = True
+
+        output = Output()
+        with mock.patch.object(nasberrypi.sys, "stdout", output):
+            nasberrypi.draw_screen("frame")
+        self.assertEqual("".join(output.writes), "\033[H\033[2J\033[Hframe")
+        self.assertTrue(output.flushed)
+
+    def test_dashboard_fits_80_by_24_terminal(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 24))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+            width = nasberrypi.terminal_width()
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 24)
+        self.assertEqual(width, 79)
+        self.assertTrue(all(len(line) <= width for line in lines))
+
+    def test_dashboard_fits_80_by_25_terminal(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 25))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 25)
+        self.assertNotEqual(lines[3], "")
+
+    def test_dashboard_fits_80_by_26_terminal(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 26))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 26)
+        self.assertNotEqual(lines[3], "")
+
+    def test_dashboard_uses_full_layout_when_it_fits_80_by_27_terminal(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 27))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            lines = nasberrypi.render_menu(self.dashboard_actions()).splitlines()
+        self.assertEqual(len(lines), 27)
+        self.assertEqual(lines[3], "")
+        self.assertEqual(lines[12], "")
+        self.assertEqual(lines[25], "")
+
+    def test_dashboard_keeps_full_spacing_on_larger_terminal(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((100, 40))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            lines = nasberrypi.render_menu(self.dashboard_actions()).splitlines()
+        self.assertEqual(len(lines), 27)
+        self.assertEqual(lines[3], "")
+        self.assertEqual(lines[12], "")
+        self.assertEqual(lines[25], "")
+
+    def test_wrapping_full_dashboard_falls_back_when_too_tall(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((45, 27))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+            width = nasberrypi.terminal_width()
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 27)
+        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertNotIn("", lines)
+
+    def test_compact_dashboard_truncates_long_status_without_exceeding_rows(self):
+        long_status = self.dashboard_status_lines()
+        long_status[2] = "Mount point  /mnt/nasberry/" + "very-long-folder-name-" * 8
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 24))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=long_status), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+            width = nasberrypi.terminal_width()
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 24)
+        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertIn("…", rendered)
+
+    def test_narrow_dashboard_uses_minimal_layout_with_safe_line_widths(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((30, 12))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions(), selected=3)
+            width = nasberrypi.terminal_width()
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 12)
+        self.assertEqual(width, 29)
+        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertIn("NASBERRY", rendered)
+        self.assertIn("❯ 4", rendered)
+        self.assertIn("Q Exit", rendered)
+
     @mock.patch.object(nasberrypi, "menu_status_lines", return_value=["Storage ready"])
     @mock.patch.object(nasberrypi, "terminal_width", return_value=60)
     def test_menu_presentation_centers_branding_and_shows_shortcuts(self, _width, _status):
@@ -440,6 +595,25 @@ class NasberryTests(unittest.TestCase):
         self.assertIn("Mount point  /mnt/nasberry", rendered)
         self.assertIn("Share user   kali", rendered)
         self.assertIn("Multiple shared folders", rendered)
+
+    @mock.patch("builtins.print")
+    @mock.patch.object(nasberrypi, "show_menu_exit")
+    @mock.patch.object(nasberrypi, "draw_screen")
+    @mock.patch.object(nasberrypi, "clear")
+    def test_repeated_down_navigation_wraps_through_exit(self, _clear, _draw, show_exit, _print):
+        selections = []
+
+        def render(_actions, selected=0):
+            selections.append(selected)
+            return "dashboard"
+
+        keys = ["\x1b[b"] * 12 + ["q"]
+        with mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
+             mock.patch.object(nasberrypi, "read_menu_key", side_effect=keys), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+        self.assertEqual(selections, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2])
+        show_exit.assert_called_once_with()
 
     @mock.patch("builtins.print")
     @mock.patch.object(nasberrypi, "show_menu_exit")

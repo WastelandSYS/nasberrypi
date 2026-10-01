@@ -124,10 +124,8 @@ def clear():
 
 def draw_screen(text):
     if sys.stdout.isatty():
-        sys.stdout.write("\033[H")
+        sys.stdout.write("\033[H\033[2J\033[H")
         sys.stdout.write(text)
-        sys.stdout.write("\n")
-        sys.stdout.write("\033[J")
         sys.stdout.flush()
     else:
         print(text)
@@ -1255,11 +1253,27 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
     return configured
 
 
+def terminal_size():
+    return shutil.get_terminal_size(fallback=(80, 24))
+
+
 def terminal_width():
-    return max(24, min(shutil.get_terminal_size(fallback=(80, 24)).columns, 100))
+    columns = max(1, terminal_size().columns)
+    width = min(columns, 100)
+    if columns <= 100 and width > 1:
+        width -= 1
+    return max(1, width)
+
+
+def terminal_height():
+    return max(8, terminal_size().lines)
 
 
 def fit_text(text, width):
+    if width <= 0:
+        return ""
+    if width == 1 and len(text) > 1:
+        return "…"
     return text if len(text) <= width else text[:max(1, width - 1)] + "…"
 
 
@@ -1281,13 +1295,17 @@ def highlight(text):
     return styled(text, "1", "30", "46")
 
 
-def panel(title, lines, width=None, selected=None, accent="36"):
+def panel(title, lines, width=None, selected=None, accent="36", wrap=True):
     width = width or terminal_width()
     inner = width - 4
     rule = "─" * (width - len(title) - 5)
     output = [styled(f"┌─ {title} {rule}┐", "1", accent)]
     for index, line in enumerate(lines):
-        wrapped = textwrap.wrap(str(line), inner, break_long_words=True, break_on_hyphens=False) or [""]
+        wrapped = (
+            textwrap.wrap(str(line), inner, break_long_words=True, break_on_hyphens=False) or [""]
+            if wrap
+            else [fit_text(str(line), inner)]
+        )
         for part in wrapped:
             content = f" {fit_text(part, inner):<{inner}} "
             left_edge = styled("│", accent)
@@ -1304,7 +1322,7 @@ def centered_line(text, width=None):
 
 def centered(lines):
     width = terminal_width()
-    indent = " " * max(0, (shutil.get_terminal_size(fallback=(80, 24)).columns - width) // 2)
+    indent = " " * max(0, (terminal_size().columns - width) // 2)
     return "\n".join(indent + line for line in lines)
 
 
@@ -1336,26 +1354,60 @@ def menu_status_lines():
     ]
 
 
-def render_menu(actions, selected=0):
-    width = terminal_width()
+def compact_menu(actions, selected, width, height):
+    tiny = height <= len(actions) + 3
+    lines = [styled(centered_line(f"NASBERRY v{APP_VERSION}", width), "1", "36")]
+    if not tiny:
+        lines.append(styled(centered_line("NETWORK STORAGE CONSOLE", width), "2", "37"))
+    for index, (shortcut, (label, _)) in enumerate(actions.items()):
+        marker = "❯" if index == selected else " "
+        lines.append(f"{marker} {shortcut} {fit_text(label, width - 4)}")
+    marker = "❯" if selected == len(actions) else " "
+    lines.append(f"{marker} Q Exit")
+    help_text = "↑/↓ Navigate  Enter Select  1–9 Shortcut  Q Exit"
+    if tiny:
+        help_text = "↑/↓ Enter  1–9  Q"
+    lines.append(centered_line(help_text, width))
+    return centered(lines)
+
+
+def menu_frame(actions, selected, width, compact=False):
     lines = [
         styled(centered_line("NASBERRY", width), "1", "36"),
         styled(centered_line(f"VERSION {APP_VERSION}", width), "1", "35"),
         styled(centered_line("◆  NETWORK STORAGE CONSOLE  ◆", width), "2", "37"),
-        "",
     ]
-    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width, accent="34"))
-    lines.append("")
+    if not compact:
+        lines.append("")
+    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width, accent="34", wrap=not compact))
+    if not compact:
+        lines.append("")
     menu_lines = []
     for index, (shortcut, (label, _)) in enumerate(actions.items()):
         marker = "❯" if index == selected else " "
         menu_lines.append(f"{marker}  {shortcut}   {label}")
     menu_lines.append("   Q   Exit")
-    lines.extend(panel("MAIN MENU", menu_lines, width, selected, accent="36"))
-    lines.append("")
+    lines.extend(panel("MAIN MENU", menu_lines, width, selected, accent="36", wrap=False))
+    if not compact:
+        lines.append("")
     help_text = "↑/↓ Navigate  •  Enter Select  •  1–9 Shortcut  •  Q Exit"
     lines.append(styled(centered_line(help_text, width), "2", "37"))
     return centered(lines)
+
+
+def render_menu(actions, selected=0):
+    width = terminal_width()
+    height = terminal_height()
+    if width < 40 or height < len(actions) + 6:
+        return compact_menu(actions, selected, width, height)
+
+    full = menu_frame(actions, selected, width, compact=False)
+    if len(full.splitlines()) <= height:
+        return full
+    compact = menu_frame(actions, selected, width, compact=True)
+    if len(compact.splitlines()) <= height:
+        return compact
+    return compact_menu(actions, selected, width, height)
 
 
 def read_menu_key():
