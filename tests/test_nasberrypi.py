@@ -12,6 +12,22 @@ SPEC.loader.exec_module(nasberrypi)
 
 
 class NasberryTests(unittest.TestCase):
+    class FakeTTY:
+        def __init__(self, data="", tty=True):
+            self.data = data
+            self.tty = tty
+
+        def isatty(self):
+            return self.tty
+
+        def fileno(self):
+            return 7
+
+        def read(self, size=1):
+            value = self.data[:size]
+            self.data = self.data[size:]
+            return value
+
     def dashboard_actions(self):
         return {
             "1": ("Start sharing files", None),
@@ -595,6 +611,178 @@ class NasberryTests(unittest.TestCase):
         self.assertIn("Mount point  /mnt/nasberry", rendered)
         self.assertIn("Share user   kali", rendered)
         self.assertIn("Multiple shared folders", rendered)
+
+    def test_tty_navigation_mode_stays_active_across_repeated_down_keys(self):
+        selections = []
+
+        def render(_actions, selected=0):
+            selections.append(selected)
+            return "dashboard"
+
+        stdin = self.FakeTTY("\x1b[B\x1b[B\x1b[Bq")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]) as getattrs, \
+             mock.patch.object(nasberrypi.tty, "setcbreak") as setcbreak, \
+             mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertEqual(selections, [0, 1, 2, 3])
+        getattrs.assert_called_once_with(7)
+        setcbreak.assert_called_once_with(7, nasberrypi.termios.TCSANOW)
+        setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
+
+    def test_tty_up_navigation_wraps_to_exit(self):
+        selections = []
+
+        def render(_actions, selected=0):
+            selections.append(selected)
+            return "dashboard"
+
+        stdin = self.FakeTTY("\x1b[Aq")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak"), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr"), \
+             mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertEqual(selections, [0, 9])
+
+    def test_enter_action_restores_normal_mode_then_resumes_navigation(self):
+        mode = {"navigation": False}
+        events = []
+
+        def setcbreak(_descriptor, _when):
+            mode["navigation"] = True
+            events.append("navigation")
+
+        def restore(_descriptor, when, _attrs):
+            mode["navigation"] = False
+            events.append(("restore", when))
+
+        def record(name):
+            def inner(*_args, **_kwargs):
+                events.append((name, mode["navigation"]))
+                return True
+            return inner
+
+        stdin = self.FakeTTY("\rq")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak", side_effect=setcbreak), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr", side_effect=restore), \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear", side_effect=record("clear")), \
+             mock.patch.object(nasberrypi, "show_action_feedback", side_effect=record("feedback")), \
+             mock.patch.object(nasberrypi, "protected", side_effect=record("action")), \
+             mock.patch.object(nasberrypi, "pause", side_effect=record("pause")), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertIn(("feedback", False), events)
+        self.assertIn(("action", False), events)
+        self.assertIn(("pause", False), events)
+        self.assertEqual(events.count("navigation"), 2)
+        self.assertEqual(
+            [event for event in events if isinstance(event, tuple) and event[0] == "restore"],
+            [("restore", nasberrypi.termios.TCSAFLUSH), ("restore", nasberrypi.termios.TCSAFLUSH)],
+        )
+
+    def test_numeric_shortcut_restores_normal_mode_then_resumes_navigation(self):
+        mode = {"navigation": False}
+        events = []
+
+        def setcbreak(_descriptor, _when):
+            mode["navigation"] = True
+            events.append("navigation")
+
+        def restore(_descriptor, when, _attrs):
+            mode["navigation"] = False
+            events.append(("restore", when))
+
+        def record(name):
+            def inner(*_args, **_kwargs):
+                events.append((name, mode["navigation"]))
+                return True
+            return inner
+
+        stdin = self.FakeTTY("6q")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak", side_effect=setcbreak), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr", side_effect=restore), \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear", side_effect=record("clear")), \
+             mock.patch.object(nasberrypi, "show_action_feedback", side_effect=record("feedback")), \
+             mock.patch.object(nasberrypi, "doctor", side_effect=record("action")), \
+             mock.patch.object(nasberrypi, "pause", side_effect=record("pause")), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertIn(("feedback", False), events)
+        self.assertIn(("action", False), events)
+        self.assertIn(("pause", False), events)
+        self.assertEqual(events.count("navigation"), 2)
+        self.assertEqual(
+            [event for event in events if isinstance(event, tuple) and event[0] == "restore"],
+            [("restore", nasberrypi.termios.TCSAFLUSH), ("restore", nasberrypi.termios.TCSAFLUSH)],
+        )
+
+    def test_keyboard_interrupt_restores_tty_navigation_mode(self):
+        stdin = self.FakeTTY("")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak"), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "read_menu_key", side_effect=KeyboardInterrupt), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
+
+    def test_unexpected_exception_restores_tty_navigation_mode(self):
+        stdin = self.FakeTTY("")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak"), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
+             mock.patch.object(nasberrypi, "draw_screen", side_effect=RuntimeError("boom")), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            with self.assertRaises(RuntimeError):
+                nasberrypi.menu()
+
+        setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
+
+    def test_read_menu_key_non_tty_uses_prompt(self):
+        with mock.patch.object(nasberrypi.sys, "stdin", self.FakeTTY(tty=False)), \
+             mock.patch("builtins.input", return_value=" 7 "):
+            self.assertEqual(nasberrypi.read_menu_key(), "7")
 
     @mock.patch("builtins.print")
     @mock.patch.object(nasberrypi, "show_menu_exit")

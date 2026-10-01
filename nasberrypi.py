@@ -1413,16 +1413,38 @@ def render_menu(actions, selected=0):
 def read_menu_key():
     if not sys.stdin.isatty():
         return input("\n  Select an action [1-9]: ").strip().lower()
-    descriptor = sys.stdin.fileno()
-    previous = termios.tcgetattr(descriptor)
-    try:
-        tty.setraw(descriptor)
-        key = sys.stdin.read(1)
-        if key == "\x1b":
-            key += sys.stdin.read(2)
-        return key.lower()
-    finally:
-        termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+    key = sys.stdin.read(1)
+    if key == "\x1b":
+        key += sys.stdin.read(2)
+    return key.lower()
+
+
+class DashboardTerminal:
+    def __init__(self, stream=None):
+        self.stream = stream or sys.stdin
+        self.enabled = self.stream.isatty()
+        self.descriptor = self.stream.fileno() if self.enabled else None
+        self.original = termios.tcgetattr(self.descriptor) if self.enabled else None
+        self.navigation_active = False
+
+    def enable_navigation_mode(self):
+        if self.enabled and not self.navigation_active:
+            tty.setcbreak(self.descriptor, termios.TCSANOW)
+            self.navigation_active = True
+
+    def restore_normal_mode(self, flush_input=False):
+        if self.enabled and self.original is not None and self.navigation_active:
+            when = termios.TCSAFLUSH if flush_input else termios.TCSADRAIN
+            termios.tcsetattr(self.descriptor, when, self.original)
+            self.navigation_active = False
+
+    def __enter__(self):
+        self.enable_navigation_mode()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.restore_normal_mode(flush_input=True)
+        return False
 
 
 def show_action_feedback(label, mode="action"):
@@ -1512,40 +1534,44 @@ def menu():
     selected = 0
     action_keys = list(actions)
     clean_exit = False
+    terminal = DashboardTerminal()
+
+    def run_selected_action(key):
+        label, action = actions[key]
+        terminal.restore_normal_mode(flush_input=True)
+        show_action_feedback(label, action_modes.get(key, "action"))
+        run_dashboard_action(action)
+        pause()
+        clear()
+        terminal.enable_navigation_mode()
+
     try:
         clear()
-        while state["running"]:
-            draw_screen(render_menu(actions, selected))
-            choice = read_menu_key()
-            if choice in {"q", "\x03"}:
-                clean_exit = True
-                state["running"] = False
-            elif choice in {"\x1b[a", "k", "w"}:
-                selected = (selected - 1) % (len(actions) + 1)
-            elif choice in {"\x1b[b", "j", "s"}:
-                selected = (selected + 1) % (len(actions) + 1)
-            elif choice in {"\r", "\n"}:
-                if selected == len(actions):
+        with terminal:
+            while state["running"]:
+                draw_screen(render_menu(actions, selected))
+                choice = read_menu_key()
+                if choice in {"q", "\x03"}:
                     clean_exit = True
                     state["running"] = False
-                else:
-                    key = action_keys[selected]
-                    label, action = actions[key]
-                    show_action_feedback(label, action_modes.get(key, "action"))
-                    run_dashboard_action(action)
-                    pause()
-                    clear()
-            elif choice in actions:
-                selected = action_keys.index(choice)
-                label, action = actions[choice]
-                show_action_feedback(label, action_modes.get(choice, "action"))
-                run_dashboard_action(action)
-                pause()
-                clear()
+                elif choice in {"\x1b[a", "k", "w"}:
+                    selected = (selected - 1) % (len(actions) + 1)
+                elif choice in {"\x1b[b", "j", "s"}:
+                    selected = (selected + 1) % (len(actions) + 1)
+                elif choice in {"\r", "\n"}:
+                    if selected == len(actions):
+                        clean_exit = True
+                        state["running"] = False
+                    else:
+                        run_selected_action(action_keys[selected])
+                elif choice in actions:
+                    selected = action_keys.index(choice)
+                    run_selected_action(choice)
     except KeyboardInterrupt:
         clean_exit = True
         state["running"] = False
     finally:
+        terminal.restore_normal_mode(flush_input=True)
         if clean_exit:
             show_menu_exit()
 
