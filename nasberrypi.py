@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 APP_VERSION = "0.3.0"
+DASHBOARD_STATUS_TTL = 1.0
 DEFAULT_CONFIG_FILE = "/etc/nasberry/config.ini" if os.geteuid() == 0 else "~/.config/nasberry/config.ini"
 CONFIG_FILE = Path(os.path.expanduser(os.environ.get("NASBERRY_CONFIG_FILE", DEFAULT_CONFIG_FILE)))
 DEFAULT_SHARES_FILE = "/etc/nasberry/shares.json" if os.geteuid() == 0 else "~/.config/nasberry/shares.json"
@@ -1354,6 +1355,25 @@ def menu_status_lines():
     ]
 
 
+class DashboardStatusCache:
+    def __init__(self, ttl=DASHBOARD_STATUS_TTL, clock=None):
+        self.ttl = ttl
+        self.clock = clock
+        self.lines = None
+        self.refreshed_at = None
+
+    def get(self):
+        now = self.clock() if self.clock else time.monotonic()
+        if self.lines is None or self.refreshed_at is None or now - self.refreshed_at >= self.ttl:
+            self.lines = menu_status_lines()
+            self.refreshed_at = now
+        return self.lines
+
+    def invalidate(self):
+        self.lines = None
+        self.refreshed_at = None
+
+
 def compact_menu(actions, selected, width, height):
     tiny = height <= len(actions) + 3
     lines = [styled(centered_line(f"NASBERRY v{APP_VERSION}", width), "1", "36")]
@@ -1371,7 +1391,7 @@ def compact_menu(actions, selected, width, height):
     return centered(lines)
 
 
-def menu_frame(actions, selected, width, compact=False):
+def menu_frame(actions, selected, width, status_lines, compact=False):
     lines = [
         styled(centered_line("NASBERRY", width), "1", "36"),
         styled(centered_line(f"VERSION {APP_VERSION}", width), "1", "35"),
@@ -1379,7 +1399,7 @@ def menu_frame(actions, selected, width, compact=False):
     ]
     if not compact:
         lines.append("")
-    lines.extend(panel("SYSTEM STATUS", menu_status_lines(), width, accent="34", wrap=not compact))
+    lines.extend(panel("SYSTEM STATUS", status_lines, width, accent="34", wrap=not compact))
     if not compact:
         lines.append("")
     menu_lines = []
@@ -1395,16 +1415,17 @@ def menu_frame(actions, selected, width, compact=False):
     return centered(lines)
 
 
-def render_menu(actions, selected=0):
+def render_menu(actions, selected=0, status_lines=None):
     width = terminal_width()
     height = terminal_height()
     if width < 40 or height < len(actions) + 6:
         return compact_menu(actions, selected, width, height)
 
-    full = menu_frame(actions, selected, width, compact=False)
+    status_lines = status_lines if status_lines is not None else menu_status_lines()
+    full = menu_frame(actions, selected, width, status_lines, compact=False)
     if len(full.splitlines()) <= height:
         return full
-    compact = menu_frame(actions, selected, width, compact=True)
+    compact = menu_frame(actions, selected, width, status_lines, compact=True)
     if len(compact.splitlines()) <= height:
         return compact
     return compact_menu(actions, selected, width, height)
@@ -1535,12 +1556,14 @@ def menu():
     action_keys = list(actions)
     clean_exit = False
     terminal = DashboardTerminal()
+    status_cache = DashboardStatusCache()
 
     def run_selected_action(key):
         label, action = actions[key]
         terminal.restore_normal_mode(flush_input=True)
         show_action_feedback(label, action_modes.get(key, "action"))
         run_dashboard_action(action)
+        status_cache.invalidate()
         pause()
         clear()
         terminal.enable_navigation_mode()
@@ -1549,7 +1572,7 @@ def menu():
         clear()
         with terminal:
             while state["running"]:
-                draw_screen(render_menu(actions, selected))
+                draw_screen(render_menu(actions, selected, status_cache.get()))
                 choice = read_menu_key()
                 if choice in {"q", "\x03"}:
                     clean_exit = True

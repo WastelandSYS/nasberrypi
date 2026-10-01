@@ -522,6 +522,52 @@ class NasberryTests(unittest.TestCase):
         self.assertTrue(all(len(line) <= width for line in lines))
         self.assertNotIn("", lines)
 
+    def test_render_menu_uses_one_status_snapshot_for_compact_fallback(self):
+        terminal = mock.patch.object(
+            nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 24))
+        )
+        with terminal, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()) as status, \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            rendered = nasberrypi.render_menu(self.dashboard_actions())
+        self.assertLessEqual(len(rendered.splitlines()), 24)
+        status.assert_called_once_with()
+
+    def test_dashboard_status_cache_reuses_lines_inside_ttl(self):
+        cache = nasberrypi.DashboardStatusCache()
+        with mock.patch.object(nasberrypi.time, "monotonic", side_effect=[0.0, 0.25, 0.75]), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=["cached"]) as status:
+            self.assertEqual(cache.get(), ["cached"])
+            self.assertEqual(cache.get(), ["cached"])
+            self.assertEqual(cache.get(), ["cached"])
+        status.assert_called_once_with()
+
+    def test_dashboard_status_cache_refreshes_after_ttl(self):
+        cache = nasberrypi.DashboardStatusCache()
+        with mock.patch.object(nasberrypi.time, "monotonic", side_effect=[0.0, 0.5, 1.0, 1.5]), \
+             mock.patch.object(nasberrypi, "menu_status_lines", side_effect=[["first"], ["second"]]) as status:
+            self.assertEqual(cache.get(), ["first"])
+            self.assertEqual(cache.get(), ["first"])
+            self.assertEqual(cache.get(), ["second"])
+            self.assertEqual(cache.get(), ["second"])
+        self.assertEqual(status.call_count, 2)
+
+    def test_cached_status_does_not_block_layout_changes(self):
+        cache = nasberrypi.DashboardStatusCache()
+        with mock.patch.object(nasberrypi.time, "monotonic", return_value=0.0), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()) as status, \
+             mock.patch.object(nasberrypi, "color_enabled", return_value=False):
+            status_lines = cache.get()
+            with mock.patch.object(nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 27))):
+                full = nasberrypi.render_menu(self.dashboard_actions(), status_lines=status_lines).splitlines()
+            with mock.patch.object(nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 24))):
+                compact = nasberrypi.render_menu(self.dashboard_actions(), status_lines=status_lines).splitlines()
+        status.assert_called_once_with()
+        self.assertEqual(len(full), 27)
+        self.assertIn("", full)
+        self.assertLessEqual(len(compact), 24)
+        self.assertNotIn("", compact)
+
     def test_compact_dashboard_truncates_long_status_without_exceeding_rows(self):
         long_status = self.dashboard_status_lines()
         long_status[2] = "Mount point  /mnt/nasberry/" + "very-long-folder-name-" * 8
@@ -615,7 +661,7 @@ class NasberryTests(unittest.TestCase):
     def test_tty_navigation_mode_stays_active_across_repeated_down_keys(self):
         selections = []
 
-        def render(_actions, selected=0):
+        def render(_actions, selected=0, _status_lines=None):
             selections.append(selected)
             return "dashboard"
 
@@ -624,6 +670,7 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]) as getattrs, \
              mock.patch.object(nasberrypi.tty, "setcbreak") as setcbreak, \
              mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()) as status, \
              mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
              mock.patch.object(nasberrypi, "draw_screen"), \
              mock.patch.object(nasberrypi, "clear"), \
@@ -636,11 +683,12 @@ class NasberryTests(unittest.TestCase):
         getattrs.assert_called_once_with(7)
         setcbreak.assert_called_once_with(7, nasberrypi.termios.TCSANOW)
         setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
+        status.assert_called_once_with()
 
     def test_tty_up_navigation_wraps_to_exit(self):
         selections = []
 
-        def render(_actions, selected=0):
+        def render(_actions, selected=0, _status_lines=None):
             selections.append(selected)
             return "dashboard"
 
@@ -649,6 +697,7 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
              mock.patch.object(nasberrypi.tty, "setcbreak"), \
              mock.patch.object(nasberrypi.termios, "tcsetattr"), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
              mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
              mock.patch.object(nasberrypi, "draw_screen"), \
              mock.patch.object(nasberrypi, "clear"), \
@@ -682,6 +731,7 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
              mock.patch.object(nasberrypi.tty, "setcbreak", side_effect=setcbreak), \
              mock.patch.object(nasberrypi.termios, "tcsetattr", side_effect=restore), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
              mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
              mock.patch.object(nasberrypi, "draw_screen"), \
              mock.patch.object(nasberrypi, "clear", side_effect=record("clear")), \
@@ -725,6 +775,7 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
              mock.patch.object(nasberrypi.tty, "setcbreak", side_effect=setcbreak), \
              mock.patch.object(nasberrypi.termios, "tcsetattr", side_effect=restore), \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
              mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
              mock.patch.object(nasberrypi, "draw_screen"), \
              mock.patch.object(nasberrypi, "clear", side_effect=record("clear")), \
@@ -745,12 +796,59 @@ class NasberryTests(unittest.TestCase):
             [("restore", nasberrypi.termios.TCSAFLUSH), ("restore", nasberrypi.termios.TCSAFLUSH)],
         )
 
+    def test_enter_action_invalidates_cached_status_before_next_render(self):
+        stdin = self.FakeTTY("\rq")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.time, "monotonic", side_effect=[0.0, 0.1]), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak"), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr"), \
+             mock.patch.object(nasberrypi, "menu_status_lines", side_effect=[["before"], ["after"]]) as status, \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard") as render, \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_action_feedback"), \
+             mock.patch.object(nasberrypi, "protected", return_value=True), \
+             mock.patch.object(nasberrypi, "pause"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertEqual(status.call_count, 2)
+        self.assertEqual(render.call_args_list[0].args[2], ["before"])
+        self.assertEqual(render.call_args_list[1].args[2], ["after"])
+
+    def test_numeric_action_invalidates_cached_status_before_next_render(self):
+        stdin = self.FakeTTY("6q")
+        with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
+             mock.patch.object(nasberrypi.time, "monotonic", side_effect=[0.0, 0.1]), \
+             mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak"), \
+             mock.patch.object(nasberrypi.termios, "tcsetattr"), \
+             mock.patch.object(nasberrypi, "menu_status_lines", side_effect=[["before"], ["after"]]) as status, \
+             mock.patch.object(nasberrypi, "render_menu", return_value="dashboard") as render, \
+             mock.patch.object(nasberrypi, "draw_screen"), \
+             mock.patch.object(nasberrypi, "clear"), \
+             mock.patch.object(nasberrypi, "show_action_feedback"), \
+             mock.patch.object(nasberrypi, "doctor", return_value=True), \
+             mock.patch.object(nasberrypi, "pause"), \
+             mock.patch.object(nasberrypi, "show_menu_exit"), \
+             mock.patch("builtins.print"), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
+            nasberrypi.menu()
+
+        self.assertEqual(status.call_count, 2)
+        self.assertEqual(render.call_args_list[0].args[2], ["before"])
+        self.assertEqual(render.call_args_list[1].args[2], ["after"])
+
     def test_keyboard_interrupt_restores_tty_navigation_mode(self):
         stdin = self.FakeTTY("")
         with mock.patch.object(nasberrypi.sys, "stdin", stdin), \
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
              mock.patch.object(nasberrypi.tty, "setcbreak"), \
              mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
              mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
              mock.patch.object(nasberrypi, "draw_screen"), \
              mock.patch.object(nasberrypi, "read_menu_key", side_effect=KeyboardInterrupt), \
@@ -768,6 +866,7 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
              mock.patch.object(nasberrypi.tty, "setcbreak"), \
              mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs, \
+             mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
              mock.patch.object(nasberrypi, "render_menu", return_value="dashboard"), \
              mock.patch.object(nasberrypi, "draw_screen", side_effect=RuntimeError("boom")), \
              mock.patch.object(nasberrypi, "clear"), \
@@ -791,12 +890,13 @@ class NasberryTests(unittest.TestCase):
     def test_repeated_down_navigation_wraps_through_exit(self, _clear, _draw, show_exit, _print):
         selections = []
 
-        def render(_actions, selected=0):
+        def render(_actions, selected=0, _status_lines=None):
             selections.append(selected)
             return "dashboard"
 
         keys = ["\x1b[b"] * 12 + ["q"]
-        with mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
+        with mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.object(nasberrypi, "render_menu", side_effect=render), \
              mock.patch.object(nasberrypi, "read_menu_key", side_effect=keys), \
              mock.patch.dict(nasberrypi.state, {"running": True}):
             nasberrypi.menu()
@@ -809,7 +909,8 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "read_menu_key", return_value="q")
     @mock.patch.object(nasberrypi, "clear")
     def test_menu_q_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
-        with mock.patch.dict(nasberrypi.state, {"running": True}):
+        with mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
             nasberrypi.menu()
             self.assertFalse(nasberrypi.state["running"])
         show_exit.assert_called_once_with()
@@ -820,7 +921,8 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "read_menu_key", return_value="\x03")
     @mock.patch.object(nasberrypi, "clear")
     def test_menu_ctrl_c_key_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
-        with mock.patch.dict(nasberrypi.state, {"running": True}):
+        with mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
             nasberrypi.menu()
             self.assertFalse(nasberrypi.state["running"])
         show_exit.assert_called_once_with()
@@ -831,7 +933,8 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "read_menu_key", side_effect=KeyboardInterrupt)
     @mock.patch.object(nasberrypi, "clear")
     def test_menu_keyboard_interrupt_exits_cleanly(self, _clear, _read_key, _render, show_exit, _print):
-        with mock.patch.dict(nasberrypi.state, {"running": True}):
+        with mock.patch.object(nasberrypi, "menu_status_lines", return_value=self.dashboard_status_lines()), \
+             mock.patch.dict(nasberrypi.state, {"running": True}):
             nasberrypi.menu()
             self.assertFalse(nasberrypi.state["running"])
         show_exit.assert_called_once_with()
