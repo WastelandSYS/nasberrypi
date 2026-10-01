@@ -413,6 +413,10 @@ def default_share():
     return {"name": "Public", "path": public_share_path(), "enabled": True, "read_only": False}
 
 
+class ShareConfigError(Exception):
+    pass
+
+
 def parse_bool(value, default=False):
     if isinstance(value, bool):
         return value
@@ -428,28 +432,75 @@ def parse_bool(value, default=False):
     return bool(value)
 
 
+def load_share_string(item, index, field, default=""):
+    if field not in item:
+        return default
+    value = item[field]
+    if isinstance(value, str):
+        return value.strip()
+    raise ShareConfigError(f"share {index}: {field} must be a string")
+
+
+def load_share_bool(item, index, field, default):
+    if field not in item or item[field] is None:
+        return default
+    value = item[field]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    elif isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise ShareConfigError(f"share {index}: {field} must be a boolean")
+
+
 def load_shares():
     try:
-        raw = json.loads(SHARES_FILE.read_text())
-        items = raw.get("shares", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        items = []
+        text = SHARES_FILE.read_text()
+    except FileNotFoundError as exc:
+        raise ShareConfigError(f"share configuration file is missing: {SHARES_FILE}") from exc
+    except OSError as exc:
+        raise ShareConfigError(f"could not read share configuration {SHARES_FILE}: {exc}") from exc
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ShareConfigError(
+            f"invalid JSON in {SHARES_FILE}: {exc.msg} at line {exc.lineno} column {exc.colno}"
+        ) from exc
+    if isinstance(raw, dict):
+        if "shares" not in raw:
+            raise ShareConfigError("share configuration must contain a 'shares' list")
+        items = raw["shares"]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ShareConfigError("share configuration must be an object with a 'shares' list or a list of shares")
+    if not isinstance(items, list):
+        raise ShareConfigError("share configuration must contain a list of shares")
     shares = []
-    seen = set()
-    for item in items:
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise ShareConfigError(f"share {index} is not an object")
         share = {
-            "name": str(item.get("name", "")).strip(),
-            "path": str(item.get("path", "")).strip(),
-            "enabled": parse_bool(item.get("enabled", True), True),
-            "read_only": parse_bool(item.get("read_only", False), False),
+            "name": load_share_string(item, index, "name"),
+            "path": load_share_string(item, index, "path"),
+            "enabled": load_share_bool(item, index, "enabled", True),
+            "read_only": load_share_bool(item, index, "read_only", False),
         }
-        ok, _ = validate_share(share, shares)
-        if ok and share["name"].lower() not in seen:
-            shares.append(share)
-            seen.add(share["name"].lower())
-    if not shares:
-        shares = [default_share()]
+        ok, reason = validate_share(share, shares)
+        if not ok:
+            raise ShareConfigError(f"share {index}: {reason}")
+        shares.append(share)
     return shares
+
+
+def ensure_default_shares_file():
+    if not SHARES_FILE.exists():
+        save_shares([default_share()])
 
 
 def save_shares(shares):
@@ -537,7 +588,7 @@ def ensure_share_folders():
             if not share.get("read_only") and not (entry.st_mode & 0o200):
                 raise OSError(f"{share['name']} folder is not writable by {SHARE_USER}")
         return True
-    except (KeyError, OSError) as exc:
+    except (KeyError, OSError, ShareConfigError) as exc:
         log(f"✖ Could not prepare shared folders: {exc}")
         return False
 
@@ -602,7 +653,10 @@ def samba_config_valid():
     shares = samba_shares()
     if shares is None:
         return False, "testparm could not read the Samba configuration"
-    expected = {share["name"]: share for share in enabled_shares()}
+    try:
+        expected = {share["name"]: share for share in enabled_shares()}
+    except ShareConfigError as exc:
+        return False, str(exc)
     if not expected:
         return False, "no enabled Nasberry shares"
     for name, share in expected.items():
@@ -903,12 +957,17 @@ def doctor():
         "mounted_elsewhere": f"mounted elsewhere at {active}; configured Nasberry mount point: {MOUNT_POINT}",
     }
     results.append(check("Mount state", True, mount_details[mount_state], label_width=label_width))
-    shares = load_shares()
-    enabled = [share for share in shares if share.get("enabled", True)]
-    results.append(check("Share configuration", bool(enabled), f"{len(enabled)} enabled of {len(shares)} configured", "Run 'sudo nasberry shares'.", label_width))
-    for share in enabled:
-        share_ok, share_detail = share_folder_status(share)
-        results.append(check(f"[{share['name']}] folder", share_ok, share_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
+    try:
+        shares = load_shares()
+        enabled = [share for share in shares if share.get("enabled", True)]
+        results.append(check("Share configuration", bool(enabled), f"{len(enabled)} enabled of {len(shares)} configured", "Run 'sudo nasberry shares'.", label_width))
+        for share in enabled:
+            share_ok, share_detail = share_folder_status(share)
+            results.append(check(f"[{share['name']}] folder", share_ok, share_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
+    except ShareConfigError as exc:
+        detail = str(exc)
+        fix = "Run 'sudo nasberry setup'." if "missing" in detail else f"Inspect or repair {SHARES_FILE}."
+        results.append(check("Share configuration", False, detail, fix, label_width))
     for folder_name in ("Private", "Backups"):
         protected_ok, protected_detail = protected_folder_status(folder_name)
         results.append(check(f"{folder_name} folder protection", protected_ok, protected_detail, "Run 'sudo nasberry repair-samba' to create or repair it.", label_width))
@@ -955,8 +1014,12 @@ def print_filesystem_guidance(filesystem):
 
 
 def print_shares(shares=None):
-    shares = shares or load_shares()
+    if shares is None:
+        shares = load_shares()
     print("\nManaged shared folders:")
+    if not shares:
+        print("  (none configured)")
+        return
     for share in shares:
         state_text = "enabled" if share.get("enabled", True) else "disabled"
         mode = "read-only" if share.get("read_only") else "read-write"
@@ -974,8 +1037,13 @@ def manage_shares():
     if os.geteuid() != 0:
         log("✖ Shared folder management must run as root: sudo nasberry shares")
         return False
-    while True:
+    try:
         shares = load_shares()
+    except ShareConfigError as exc:
+        log(f"✖ Share configuration error: {exc}")
+        log("Inspect or repair the shares file, or run 'sudo nasberry setup' if this is a new install.")
+        return False
+    while True:
         print_shares(shares)
         print("\n  1) Create share")
         print("  2) Enable/disable share")
@@ -1015,7 +1083,7 @@ def manage_shares():
                 answer = input(f"Remove [{share['name']}] from Nasberry management? Data is not deleted. [y/N]: ").strip().lower()
                 if answer in {"y", "yes"}:
                     shares.remove(share)
-                    save_shares(shares or [default_share()])
+                    save_shares(shares)
                     log(f"✔ Removed [{share['name']}] from Nasberry management")
         elif choice == "5":
             if ensure_share_folders() and configure_samba_share() and restart_samba_service():
@@ -1165,6 +1233,11 @@ def configure_samba_share():
     if not valid_share_user(SHARE_USER):
         log("✖ Refusing to create Samba configuration with an unsafe share user")
         return False
+    try:
+        managed_section = appliance_samba_config()
+    except ShareConfigError as exc:
+        log(f"✖ Share configuration error: {exc}")
+        return False
     if not samba_config_preflight():
         return False
     log("Updating the NasberryPi managed Samba section only.")
@@ -1176,7 +1249,7 @@ def configure_samba_share():
     candidate = Path(candidate_name)
     try:
         with os.fdopen(descriptor, "w") as handle:
-            handle.write(replace_managed_samba_section(smb_file.read_text(), appliance_samba_config()))
+            handle.write(replace_managed_samba_section(smb_file.read_text(), managed_section))
             handle.flush()
             os.fsync(handle.fileno())
         shutil.copymode(smb_file, candidate)
@@ -1230,8 +1303,7 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
         settings["pin_hash"] = hash_pin(first)
     save_config()
     refresh_settings()
-    if not SHARES_FILE.exists():
-        save_shares([default_share()])
+    ensure_default_shares_file()
     configured = mount_storage(repair_permissions=True) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
     password_updated = False
     if configured and settings.get("share_user") and not non_interactive and command_exists("smbpasswd"):
@@ -1344,10 +1416,13 @@ def menu_status_lines():
     present = device_exists()
     mount_state, mount_location = menu_mount_status()
     sharing = service_active()
-    enabled_count = len(enabled_shares())
+    try:
+        share_detail = f"{len(enabled_shares())} enabled share(s)"
+    except ShareConfigError:
+        share_detail = "share config error"
     return [
         f"Storage      {'● present' if present else '○ missing'}   {mount_state}",
-        f"Sharing      {'● sharing online' if sharing else '○ sharing offline'}   {enabled_count} enabled share(s)",
+        f"Sharing      {'● sharing online' if sharing else '○ sharing offline'}   {share_detail}",
         f"Mount point  {mount_location}",
         f"Share user   {SHARE_USER or 'not configured'}",
         "Share mode   Multiple shared folders",
@@ -1494,7 +1569,11 @@ def status():
     print(f"Mount state    : {storage_mount_state_label()}")
     print(f"File sharing   : {'sharing online' if service_active() else 'sharing offline'}")
     print("Share mode     : Multiple shared folders")
-    print(f"Enabled shares : {len(enabled_shares())}")
+    try:
+        share_count = str(len(enabled_shares()))
+    except ShareConfigError as exc:
+        share_count = f"configuration error: {exc}"
+    print(f"Enabled shares : {share_count}")
     print(f"Disk space     : {disk_usage()}")
     print(f"Mount point    : {mount_point or MOUNT_POINT}")
     print(f"Share user     : {SHARE_USER or 'not configured'}")
