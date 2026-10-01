@@ -295,8 +295,9 @@ def command_exists(command):
 
 
 def clear():
-    if sys.stdout.isatty() and os.environ.get("TERM"):
-        os.system("clear")
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[H\033[2J\033[H")
+        sys.stdout.flush()
 
 
 def draw_screen(text):
@@ -1719,30 +1720,65 @@ def read_menu_key():
 
 
 class DashboardTerminal:
-    def __init__(self, stream=None):
-        self.stream = stream or sys.stdin
-        self.enabled = self.stream.isatty()
-        self.descriptor = self.stream.fileno() if self.enabled else None
-        self.original = termios.tcgetattr(self.descriptor) if self.enabled else None
+    def __init__(self, input_stream=None, output_stream=None):
+        self.input_stream = input_stream or sys.stdin
+        self.output_stream = output_stream or sys.stdout
+        self.input_tty = self.input_stream.isatty()
+        self.output_tty = self.output_stream.isatty()
+        self.alternate_enabled = self.input_tty and self.output_tty
+        self.descriptor = self.input_stream.fileno() if self.input_tty else None
+        self.original = termios.tcgetattr(self.descriptor) if self.input_tty else None
         self.navigation_active = False
+        self.alternate_active = False
 
     def enable_navigation_mode(self):
-        if self.enabled and not self.navigation_active:
+        if self.input_tty and not self.navigation_active:
             tty.setcbreak(self.descriptor, termios.TCSANOW)
             self.navigation_active = True
 
-    def restore_normal_mode(self, flush_input=False):
-        if self.enabled and self.original is not None and self.navigation_active:
+    def restore_normal_mode(self, flush_input=False, suppress_errors=False):
+        if self.input_tty and self.original is not None and self.navigation_active:
             when = termios.TCSAFLUSH if flush_input else termios.TCSADRAIN
-            termios.tcsetattr(self.descriptor, when, self.original)
-            self.navigation_active = False
+            try:
+                termios.tcsetattr(self.descriptor, when, self.original)
+            except Exception:
+                if not suppress_errors:
+                    raise
+            finally:
+                self.navigation_active = False
+
+    def enter_alternate_screen(self):
+        if self.alternate_enabled and not self.alternate_active:
+            self.alternate_active = True
+            self.output_stream.write("\033[?1049h")
+            self.output_stream.flush()
+
+    def leave_alternate_screen(self, suppress_errors=False):
+        if self.alternate_enabled and self.alternate_active:
+            try:
+                self.output_stream.write("\033[?1049l")
+                self.output_stream.flush()
+            except Exception:
+                if not suppress_errors:
+                    raise
+            finally:
+                self.alternate_active = False
+
+    def close(self, flush_input=True, suppress_errors=False):
+        self.restore_normal_mode(flush_input=flush_input, suppress_errors=suppress_errors)
+        self.leave_alternate_screen(suppress_errors=suppress_errors)
 
     def __enter__(self):
-        self.enable_navigation_mode()
-        return self
+        try:
+            self.enter_alternate_screen()
+            self.enable_navigation_mode()
+            return self
+        except Exception:
+            self.close(flush_input=True, suppress_errors=True)
+            raise
 
-    def __exit__(self, _exc_type, _exc, _traceback):
-        self.restore_normal_mode(flush_input=True)
+    def __exit__(self, exc_type, _exc, _traceback):
+        self.close(flush_input=True, suppress_errors=exc_type is not None)
         return False
 
 
@@ -1858,6 +1894,7 @@ def menu():
     def run_selected_action(key):
         label, action = actions[key]
         terminal.restore_normal_mode(flush_input=True)
+        terminal.leave_alternate_screen()
         show_action_feedback(label, action_modes.get(key, "action"))
         if key in config_dependent_actions and not require_valid_config(label):
             pass
@@ -1865,11 +1902,10 @@ def menu():
             run_dashboard_action(action)
         status_cache.invalidate()
         pause()
-        clear()
+        terminal.enter_alternate_screen()
         terminal.enable_navigation_mode()
 
     try:
-        clear()
         with terminal:
             while state["running"]:
                 draw_screen(render_menu(actions, selected, status_cache.get()))
@@ -1894,7 +1930,7 @@ def menu():
         clean_exit = True
         state["running"] = False
     finally:
-        terminal.restore_normal_mode(flush_input=True)
+        terminal.close(flush_input=True, suppress_errors=sys.exc_info()[0] is not None)
         if clean_exit:
             show_menu_exit()
 
