@@ -457,7 +457,16 @@ def cleanup_other_mounts(confirm=True):
         log("⚠ Storage is mounted outside the Nasberry mount point.")
         log(f"Current mount point : {', '.join(mounts)}")
         log(f"Nasberry mount point: {MOUNT_POINT}")
-        if input("Move it into NAS mode? [y/N]: ").strip().lower() not in {"y", "yes"}:
+        if not sys.stdin.isatty():
+            log("✖ Confirmation is required before moving externally mounted storage.")
+            log("Run this command interactively to continue.")
+            return False
+        try:
+            answer = input("Move it into NAS mode? [y/N]: ").strip().lower()
+        except EOFError:
+            log("✖ Confirmation is required before moving externally mounted storage.")
+            return False
+        if answer not in {"y", "yes"}:
             log("Mount cancelled; storage remains mounted elsewhere")
             return False
     for point in mounts:
@@ -469,15 +478,18 @@ def cleanup_other_mounts(confirm=True):
     return True
 
 
-def mount_storage(repair_permissions=False):
+def mount_storage(repair_permissions=False, confirm_external_move=True):
     operation_header("MOUNT STORAGE", "Preparing storage for NAS access")
-    if not ensure_mount_point() or not cleanup_other_mounts(confirm=not repair_permissions):
+    if not ensure_mount_point():
         write_state(is_mounted(), service_active())
         return False
     if is_mounted() and not device_mounted_at_nas():
         log(f"✖ Mount point is already occupied by a different filesystem: {MOUNT_POINT}")
         log("Unmount it or choose another Nasberry mount point before starting sharing.")
         write_state(False, service_active())
+        return False
+    if not cleanup_other_mounts(confirm=confirm_external_move):
+        write_state(is_mounted(), service_active())
         return False
     options = storage_mount_options()
     if is_mounted() and repair_permissions and options:
@@ -1373,7 +1385,7 @@ def repair_samba_share():
         return False
     if not samba_config_preflight():
         return False
-    if not mount_storage(repair_permissions=True) or not ensure_storage_layout() or not ensure_share_folders() or not configure_samba_share():
+    if not mount_storage(repair_permissions=True, confirm_external_move=True) or not ensure_storage_layout() or not ensure_share_folders() or not configure_samba_share():
         log("✖ Samba repair failed. Review the validation error above.")
         return False
     if not restart_samba_service():
@@ -1497,7 +1509,7 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
             log(f"  {fix}")
         return False
     ensure_default_shares_file()
-    configured = mount_storage(repair_permissions=True) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
+    configured = mount_storage(repair_permissions=True, confirm_external_move=False) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
     password_updated = False
     if configured and settings.get("share_user") and not non_interactive and command_exists("smbpasswd"):
         log(f"Set the Samba network password for {settings['share_user']}:")
