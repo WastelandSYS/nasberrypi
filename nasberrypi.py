@@ -2221,8 +2221,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if config_ready() and SAFE_MODE_ON_START:
-        enforce_boot_safety()
     def guarded(operation, action):
         return require_valid_config(operation) and action()
     commands = {
@@ -2246,6 +2244,8 @@ def main():
         return guarded("safe mode", enforce_boot_safety)
     if args.command in commands:
         return commands[args.command]()
+    if config_ready() and SAFE_MODE_ON_START and not enforce_boot_safety():
+        return False
     menu()
     return True
 

@@ -3084,6 +3084,18 @@ class NasberryTests(unittest.TestCase):
             self.assertTrue(nasberrypi.main())
         enforce.assert_not_called()
 
+    def test_dashboard_does_not_enforce_safe_mode_from_invalid_config(self):
+        with mock.patch.object(sys, "argv", ["nasberry"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
+             mock.patch.object(nasberrypi, "CONFIG_ERROR", "bad config"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch.object(nasberrypi, "menu") as menu:
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_not_called()
+        menu.assert_called_once_with()
+
     def test_safe_mode_command_refuses_invalid_config(self):
         with mock.patch.object(sys, "argv", ["nasberry", "safe-mode", "--yes"]), \
              mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
@@ -3094,13 +3106,80 @@ class NasberryTests(unittest.TestCase):
             self.assertFalse(nasberrypi.main())
         enforce.assert_not_called()
 
-    def test_main_enforces_safe_mode_when_valid_config_requests_it(self):
-        with mock.patch.object(sys, "argv", ["nasberry", "doctor"]), \
+    def test_safe_mode_command_enforces_once_and_returns_result(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "safe-mode", "--yes"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety", return_value=False) as enforce, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.main())
+        enforce.assert_called_once_with()
+
+    def test_dashboard_enforces_safe_mode_when_valid_config_requests_it(self):
+        with mock.patch.object(sys, "argv", ["nasberry"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
              mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
              mock.patch.object(nasberrypi, "enforce_boot_safety", return_value=True) as enforce, \
-             mock.patch.object(nasberrypi, "doctor", return_value=True):
+             mock.patch.object(nasberrypi, "menu") as menu:
             self.assertTrue(nasberrypi.main())
         enforce.assert_called_once_with()
+        menu.assert_called_once_with()
+
+    def test_dashboard_stops_when_safe_mode_enforcement_fails(self):
+        with mock.patch.object(sys, "argv", ["nasberry"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety", return_value=False) as enforce, \
+             mock.patch.object(nasberrypi, "menu") as menu:
+            self.assertFalse(nasberrypi.main())
+        enforce.assert_called_once_with()
+        menu.assert_not_called()
+
+    def test_dashboard_does_not_enforce_safe_mode_when_disabled(self):
+        with mock.patch.object(sys, "argv", ["nasberry"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", False), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch.object(nasberrypi, "menu") as menu:
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_not_called()
+        menu.assert_called_once_with()
+
+    def test_explicit_read_only_commands_do_not_auto_enforce_safe_mode(self):
+        for command, target in (("doctor", "doctor"), ("status", "status")):
+            with self.subTest(command=command), \
+                 mock.patch.object(sys, "argv", ["nasberry", command]), \
+                 mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+                 mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+                 mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+                 mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+                 mock.patch.object(nasberrypi, target, return_value=True):
+                self.assertTrue(nasberrypi.main())
+            enforce.assert_not_called()
+
+    def test_explicit_online_does_not_auto_enforce_safe_mode(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "online"]), \
+             mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"), \
+             mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch.object(nasberrypi, "protected", return_value=True) as protected:
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_not_called()
+        protected.assert_called_once()
+
+    def test_explicit_setup_does_not_auto_enforce_safe_mode(self):
+        with mock.patch.object(sys, "argv", ["nasberry", "setup", "--non-interactive", "--skip-pin"]), \
+             mock.patch.object(nasberrypi, "SAFE_MODE_ON_START", True), \
+             mock.patch.object(nasberrypi, "enforce_boot_safety") as enforce, \
+             mock.patch.object(nasberrypi, "setup", return_value=True) as setup:
+            self.assertTrue(nasberrypi.main())
+        enforce.assert_not_called()
+        setup.assert_called_once_with(True, True, None)
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_setup_refuses_invalid_config_without_overwriting(self, _geteuid):
