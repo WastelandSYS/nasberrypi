@@ -695,8 +695,14 @@ def load_shares(check_filesystem=True):
 
 
 def ensure_default_shares_file():
-    if not os.path.lexists(SHARES_FILE):
+    if os.path.lexists(SHARES_FILE):
+        return True
+    try:
         save_shares([default_share()])
+    except OSError as exc:
+        log(f"✖ Could not create share configuration {SHARES_FILE}: {exc}")
+        return False
+    return True
 
 
 def save_shares(shares):
@@ -1585,6 +1591,10 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
         return False
     if not setup_share_config_preflight():
         return False
+    if not ensure_default_shares_file():
+        return False
+    if not share_config_preflight():
+        return False
     settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}"
     settings["mount_point"] = MOUNT_POINT
     settings["share_name"] = "Public"
@@ -1606,7 +1616,6 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
         if fix:
             log(f"  {fix}")
         return False
-    ensure_default_shares_file()
     if not share_config_preflight():
         return False
     configured = mount_storage(repair_permissions=True, confirm_external_move=False) and ensure_storage_layout() and ensure_share_folders() and configure_samba_share()
