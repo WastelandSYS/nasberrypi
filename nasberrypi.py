@@ -396,12 +396,14 @@ def filesystem_uses_mount_permissions():
 
 
 def storage_mount_options():
-    if not filesystem_uses_mount_permissions() or not SHARE_USER:
+    if not filesystem_uses_mount_permissions():
         return []
+    if not SHARE_USER:
+        return None
     try:
         owner = pwd.getpwnam(SHARE_USER)
-    except KeyError:
-        return []
+    except (KeyError, TypeError):
+        return None
     return ["-o", f"uid={owner.pw_uid},gid={owner.pw_gid},umask=0002"]
 
 
@@ -481,6 +483,15 @@ def cleanup_other_mounts(confirm=True):
 def mount_storage(repair_permissions=False, confirm_external_move=True):
     operation_header("MOUNT STORAGE", "Preparing storage for NAS access")
     stopped_share_for_repair = False
+    options = storage_mount_options()
+    if options is None:
+        if SHARE_USER:
+            log(f"✖ Cannot mount this filesystem safely because the configured Linux share user does not exist: {SHARE_USER!r}")
+        else:
+            log("✖ Cannot mount this filesystem safely because no Linux share user is configured.")
+        log("This filesystem requires mount ownership options.")
+        log("Run 'sudo nasberry setup' to select a valid share user.")
+        return False
     if not ensure_mount_point():
         write_state(is_mounted(), service_active())
         return False
@@ -492,7 +503,6 @@ def mount_storage(repair_permissions=False, confirm_external_move=True):
     if not cleanup_other_mounts(confirm=confirm_external_move):
         write_state(is_mounted(), service_active())
         return False
-    options = storage_mount_options()
     if is_mounted() and repair_permissions and options:
         if service_active():
             if not stop_share():
