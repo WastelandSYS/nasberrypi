@@ -30,7 +30,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 DASHBOARD_STATUS_TTL = 1.0
 DEFAULT_CONFIG_FILE = "/etc/nasberry/config.ini" if os.geteuid() == 0 else "~/.config/nasberry/config.ini"
 CONFIG_FILE = Path(os.path.expanduser(os.environ.get("NASBERRY_CONFIG_FILE", DEFAULT_CONFIG_FILE)))
@@ -805,6 +805,12 @@ def validate_share(share, existing=None, check_filesystem=True):
 
 def enabled_shares():
     return [share for share in load_shares() if share.get("enabled", True)]
+
+
+def nasberry_sharing_online(enabled=None):
+    if enabled is None:
+        enabled = enabled_shares()
+    return bool(enabled) and device_mounted_at_nas() and service_active()
 
 
 def ensure_share_folders():
@@ -2078,8 +2084,8 @@ def terminal_size():
 
 def terminal_width():
     columns = max(1, terminal_size().columns)
-    width = min(columns, 100)
-    if columns <= 100 and width > 1:
+    width = min(max(1, columns - 2), 100)
+    if width > 1 and (columns - width) % 2:
         width -= 1
     return max(1, width)
 
@@ -2173,9 +2179,10 @@ def menu_status_lines():
     present = device_exists()
     mount_state, mount_location = menu_mount_status()
     try:
-        enabled_count = len(enabled_shares())
+        enabled = enabled_shares()
+        enabled_count = len(enabled)
         share_detail = f"{enabled_count} enabled share(s)"
-        sharing_text = "○ no shares enabled" if enabled_count == 0 else ("● sharing online" if service_active() else "○ sharing offline")
+        sharing_text = "○ no shares enabled" if enabled_count == 0 else ("● sharing online" if nasberry_sharing_online(enabled) else "○ sharing offline")
     except ShareConfigError:
         share_detail = "share config error"
         sharing_text = "✖ share config error"
@@ -2285,6 +2292,7 @@ class DashboardTerminal:
         self.original = termios.tcgetattr(self.descriptor) if self.input_tty else None
         self.navigation_active = False
         self.alternate_active = False
+        self.cursor_hidden = False
 
     def enable_navigation_mode(self):
         if self.input_tty and not self.navigation_active:
@@ -2319,13 +2327,42 @@ class DashboardTerminal:
             finally:
                 self.alternate_active = False
 
+    def hide_cursor(self):
+        if self.alternate_enabled and not self.cursor_hidden:
+            self.output_stream.write("\033[?25l")
+            self.cursor_hidden = True
+            self.output_stream.flush()
+
+    def show_cursor(self, suppress_errors=False):
+        if self.output_tty and self.cursor_hidden:
+            try:
+                self.output_stream.write("\033[?25h")
+                self.output_stream.flush()
+            except Exception:
+                if not suppress_errors:
+                    raise
+            finally:
+                self.cursor_hidden = False
+
     def close(self, flush_input=True, suppress_errors=False):
-        self.restore_normal_mode(flush_input=flush_input, suppress_errors=suppress_errors)
-        self.leave_alternate_screen(suppress_errors=suppress_errors)
+        first_error = None
+        for cleanup in (
+            lambda: self.restore_normal_mode(flush_input=flush_input, suppress_errors=suppress_errors),
+            lambda: self.show_cursor(suppress_errors=suppress_errors),
+            lambda: self.leave_alternate_screen(suppress_errors=suppress_errors),
+        ):
+            try:
+                cleanup()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None and not suppress_errors:
+            raise first_error
 
     def __enter__(self):
         try:
             self.enter_alternate_screen()
+            self.hide_cursor()
             self.enable_navigation_mode()
             return self
         except Exception:
@@ -2368,9 +2405,11 @@ def status():
     try:
         enabled = enabled_shares()
         share_count = str(len(enabled))
-        sharing_text = "no shares enabled" if not enabled else ("sharing online" if service_active() else "sharing offline")
+        sharing_online = nasberry_sharing_online(enabled)
+        sharing_text = "no shares enabled" if not enabled else ("sharing online" if sharing_online else "sharing offline")
     except ShareConfigError as exc:
         enabled = None
+        sharing_online = False
         share_count = f"configuration error: {exc}"
         sharing_text = "share config error"
     print(f"Storage device : {DEVICE} ({'present' if device_exists() else 'missing'})")
@@ -2382,7 +2421,7 @@ def status():
     print(f"Disk space     : {disk_usage()}")
     print(f"Mount point    : {mount_point or MOUNT_POINT}")
     print(f"Share user     : {SHARE_USER or 'not configured'}")
-    if enabled and service_active():
+    if enabled and sharing_online:
         print_connection_info()
 
 def storage_info():
@@ -2453,6 +2492,7 @@ def menu():
     def run_selected_action(key):
         label, action = actions[key]
         terminal.restore_normal_mode(flush_input=True)
+        terminal.show_cursor()
         terminal.leave_alternate_screen()
         show_action_feedback(label, action_modes.get(key, "action"))
         if key in config_dependent_actions and not require_valid_config(label):
@@ -2462,6 +2502,7 @@ def menu():
         status_cache.invalidate()
         pause()
         terminal.enter_alternate_screen()
+        terminal.hide_cursor()
         terminal.enable_navigation_mode()
 
     try:

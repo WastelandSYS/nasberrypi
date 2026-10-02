@@ -1359,6 +1359,23 @@ class NasberryTests(unittest.TestCase):
             nasberrypi.status()
         save_shares.assert_not_called()
 
+    def test_nasberry_sharing_online_requires_enabled_share_mount_and_service(self):
+        enabled = [nasberrypi.default_share()]
+        with mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=False), \
+             mock.patch.object(nasberrypi, "service_active", return_value=True):
+            self.assertFalse(nasberrypi.nasberry_sharing_online(enabled))
+        with mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
+             mock.patch.object(nasberrypi, "service_active", return_value=True):
+            self.assertTrue(nasberrypi.nasberry_sharing_online(enabled))
+        with mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
+             mock.patch.object(nasberrypi, "service_active", return_value=False):
+            self.assertFalse(nasberrypi.nasberry_sharing_online(enabled))
+        with mock.patch.object(nasberrypi, "device_mounted_at_nas") as mounted, \
+             mock.patch.object(nasberrypi, "service_active") as active:
+            self.assertFalse(nasberrypi.nasberry_sharing_online([]))
+        mounted.assert_not_called()
+        active.assert_not_called()
+
     def test_doctor_does_not_migrate_missing_shares(self):
         with mock.patch.object(nasberrypi, "section_header"), \
              mock.patch.object(nasberrypi, "configuration_check", return_value=(True, "ok", "")), \
@@ -2401,6 +2418,29 @@ class NasberryTests(unittest.TestCase):
         self.assertEqual("".join(output.writes), "\033[H\033[2J\033[Hframe")
         self.assertTrue(output.flushed)
 
+    def test_terminal_width_leaves_symmetric_margin(self):
+        cases = {
+            80: 78,
+            81: 79,
+            100: 98,
+            101: 99,
+            102: 100,
+            103: 99,
+            120: 100,
+        }
+        for columns, expected in cases.items():
+            with self.subTest(columns=columns), \
+                 mock.patch.object(nasberrypi, "terminal_size", return_value=os.terminal_size((columns, 24))):
+                width = nasberrypi.terminal_width()
+            self.assertEqual(width, expected)
+            self.assertEqual((columns - width) % 2, 0)
+
+    def test_terminal_width_tiny_terminal_stays_safe(self):
+        for columns in (0, 1, 2, 3):
+            with self.subTest(columns=columns), \
+                 mock.patch.object(nasberrypi, "terminal_size", return_value=os.terminal_size((columns, 24))):
+                self.assertGreaterEqual(nasberrypi.terminal_width(), 1)
+
     def test_dashboard_fits_80_by_24_terminal(self):
         terminal = mock.patch.object(
             nasberrypi.shutil, "get_terminal_size", return_value=os.terminal_size((80, 24))
@@ -2412,8 +2452,8 @@ class NasberryTests(unittest.TestCase):
             width = nasberrypi.terminal_width()
         lines = rendered.splitlines()
         self.assertLessEqual(len(lines), 24)
-        self.assertEqual(width, 79)
-        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertEqual(width, 78)
+        self.assertTrue(all(len(line) <= 79 for line in lines))
 
     def test_dashboard_fits_80_by_25_terminal(self):
         terminal = mock.patch.object(
@@ -2448,9 +2488,9 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi, "color_enabled", return_value=False):
             lines = nasberrypi.render_menu(self.dashboard_actions()).splitlines()
         self.assertEqual(len(lines), 27)
-        self.assertEqual(lines[3], "")
-        self.assertEqual(lines[12], "")
-        self.assertEqual(lines[25], "")
+        self.assertEqual(lines[3].strip(), "")
+        self.assertEqual(lines[12].strip(), "")
+        self.assertEqual(lines[25].strip(), "")
 
     def test_dashboard_keeps_full_spacing_on_larger_terminal(self):
         terminal = mock.patch.object(
@@ -2461,9 +2501,9 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi, "color_enabled", return_value=False):
             lines = nasberrypi.render_menu(self.dashboard_actions()).splitlines()
         self.assertEqual(len(lines), 27)
-        self.assertEqual(lines[3], "")
-        self.assertEqual(lines[12], "")
-        self.assertEqual(lines[25], "")
+        self.assertEqual(lines[3].strip(), "")
+        self.assertEqual(lines[12].strip(), "")
+        self.assertEqual(lines[25].strip(), "")
 
     def test_wrapping_full_dashboard_falls_back_when_too_tall(self):
         terminal = mock.patch.object(
@@ -2476,8 +2516,8 @@ class NasberryTests(unittest.TestCase):
             width = nasberrypi.terminal_width()
         lines = rendered.splitlines()
         self.assertLessEqual(len(lines), 27)
-        self.assertTrue(all(len(line) <= width for line in lines))
-        self.assertNotIn("", lines)
+        self.assertTrue(all(len(line) <= 44 for line in lines))
+        self.assertFalse(any(line.strip() == "" for line in lines))
 
     def test_render_menu_uses_one_status_snapshot_for_compact_fallback(self):
         terminal = mock.patch.object(
@@ -2521,9 +2561,9 @@ class NasberryTests(unittest.TestCase):
                 compact = nasberrypi.render_menu(self.dashboard_actions(), status_lines=status_lines).splitlines()
         status.assert_called_once_with()
         self.assertEqual(len(full), 27)
-        self.assertIn("", full)
+        self.assertTrue(any(line.strip() == "" for line in full))
         self.assertLessEqual(len(compact), 24)
-        self.assertNotIn("", compact)
+        self.assertFalse(any(line.strip() == "" for line in compact))
 
     def test_compact_dashboard_truncates_long_status_without_exceeding_rows(self):
         long_status = self.dashboard_status_lines()
@@ -2538,7 +2578,7 @@ class NasberryTests(unittest.TestCase):
             width = nasberrypi.terminal_width()
         lines = rendered.splitlines()
         self.assertLessEqual(len(lines), 24)
-        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertTrue(all(len(line) <= 79 for line in lines))
         self.assertIn("…", rendered)
 
     def test_narrow_dashboard_uses_minimal_layout_with_safe_line_widths(self):
@@ -2552,8 +2592,8 @@ class NasberryTests(unittest.TestCase):
             width = nasberrypi.terminal_width()
         lines = rendered.splitlines()
         self.assertLessEqual(len(lines), 12)
-        self.assertEqual(width, 29)
-        self.assertTrue(all(len(line) <= width for line in lines))
+        self.assertEqual(width, 28)
+        self.assertTrue(all(len(line) <= 29 for line in lines))
         self.assertIn("NASBERRY", rendered)
         self.assertIn("❯ 4", rendered)
         self.assertIn("Q Exit", rendered)
@@ -2606,9 +2646,10 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free of 20 GB")
     @mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()])
     @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True)
     @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("● mounted in NAS mode", "/mnt/nasberry"))
     @mock.patch.object(nasberrypi, "device_exists", return_value=True)
-    def test_menu_status_shows_multiple_shared_folders(self, _device, _mount, _sharing, _enabled, _usage):
+    def test_menu_status_shows_multiple_shared_folders(self, _device, _mount, _nas_mount, _sharing, _enabled, _usage):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"):
             rendered = "\n".join(nasberrypi.menu_status_lines())
         self.assertIn("1 enabled share(s)", rendered)
@@ -2637,6 +2678,18 @@ class NasberryTests(unittest.TestCase):
         self.assertIn("0 enabled share(s)", rendered)
         self.assertNotIn("sharing online", rendered)
         service_active.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "disk_usage", return_value="Not mounted")
+    @mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()])
+    @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=False)
+    @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("○ safely unmounted", "/mnt/nasberry (configured)"))
+    @mock.patch.object(nasberrypi, "device_exists", return_value=True)
+    def test_menu_status_reports_offline_when_smbd_active_but_storage_unmounted(self, _device, _mount, _nas_mount, _sharing, _enabled, _usage):
+        rendered = "\n".join(nasberrypi.menu_status_lines())
+        self.assertIn("Storage      ● present   ○ safely unmounted", rendered)
+        self.assertIn("Sharing      ○ sharing offline   1 enabled share(s)", rendered)
+        self.assertNotIn("● sharing online", rendered)
 
     def test_menu_status_reports_missing_main_config_without_defaults(self):
         with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
@@ -2715,6 +2768,8 @@ class NasberryTests(unittest.TestCase):
             nasberrypi.menu()
         self.assertEqual(output.writes.count("\033[?1049h"), 1)
         self.assertEqual(output.writes.count("\033[?1049l"), 1)
+        self.assertEqual(output.writes.count("\033[?25l"), 1)
+        self.assertEqual(output.writes.count("\033[?25h"), 1)
 
     def test_clean_exit_feedback_runs_after_leaving_alternate_screen(self):
         events = []
@@ -2988,7 +3043,7 @@ class NasberryTests(unittest.TestCase):
             nasberrypi.menu()
 
         setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
-        self.assertEqual(output.writes, ["\033[?1049h", "\033[?1049l"])
+        self.assertEqual(output.writes, ["\033[?1049h", "\033[?25l", "\033[?25h", "\033[?1049l"])
 
     def test_unexpected_exception_restores_tty_navigation_mode(self):
         stdin = self.FakeTTY("")
@@ -3009,7 +3064,7 @@ class NasberryTests(unittest.TestCase):
                 nasberrypi.menu()
 
         setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
-        self.assertEqual(output.writes, ["\033[?1049h", "\033[?1049l"])
+        self.assertEqual(output.writes, ["\033[?1049h", "\033[?25l", "\033[?25h", "\033[?1049l"])
 
     def test_read_menu_key_non_tty_uses_prompt(self):
         with mock.patch.object(nasberrypi.sys, "stdin", self.FakeTTY(tty=False)), \
@@ -3029,6 +3084,34 @@ class NasberryTests(unittest.TestCase):
             terminal.leave_alternate_screen()
         self.assertEqual(output.writes, ["\033[?1049h", "\033[?1049l"])
         self.assertFalse(terminal.alternate_active)
+
+    def test_dashboard_terminal_hides_and_restores_cursor_in_tty_context(self):
+        stdin = self.FakeTTY(tty=True)
+        output = self.FakeOutput(tty=True)
+        with mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]), \
+             mock.patch.object(nasberrypi.tty, "setcbreak") as setcbreak, \
+             mock.patch.object(nasberrypi.termios, "tcsetattr") as setattrs:
+            terminal = nasberrypi.DashboardTerminal(input_stream=stdin, output_stream=output)
+            with terminal:
+                self.assertTrue(terminal.alternate_active)
+                self.assertTrue(terminal.cursor_hidden)
+                self.assertTrue(terminal.navigation_active)
+        self.assertEqual(output.writes, ["\033[?1049h", "\033[?25l", "\033[?25h", "\033[?1049l"])
+        setcbreak.assert_called_once_with(7, nasberrypi.termios.TCSANOW)
+        setattrs.assert_called_once_with(7, nasberrypi.termios.TCSAFLUSH, ["original"])
+        self.assertFalse(terminal.cursor_hidden)
+
+    def test_dashboard_terminal_cursor_visibility_is_idempotent(self):
+        stdin = self.FakeTTY(tty=True)
+        output = self.FakeOutput(tty=True)
+        with mock.patch.object(nasberrypi.termios, "tcgetattr", return_value=["original"]):
+            terminal = nasberrypi.DashboardTerminal(input_stream=stdin, output_stream=output)
+            terminal.hide_cursor()
+            terminal.hide_cursor()
+            terminal.show_cursor()
+            terminal.show_cursor()
+        self.assertEqual(output.writes, ["\033[?25l", "\033[?25h"])
+        self.assertFalse(terminal.cursor_hidden)
 
     def test_dashboard_terminal_uses_alternate_screen_only_when_input_and_output_are_ttys(self):
         stdout_pipe = self.FakeOutput(tty=False)
@@ -3065,7 +3148,8 @@ class NasberryTests(unittest.TestCase):
                     raise RuntimeError("boom")
         self.assertFalse(terminal.navigation_active)
         self.assertFalse(terminal.alternate_active)
-        self.assertEqual(output.writes, ["\033[?1049h", "\033[?1049l"])
+        self.assertFalse(terminal.cursor_hidden)
+        self.assertEqual(output.writes, ["\033[?1049h", "\033[?25l", "\033[?25h", "\033[?1049l"])
 
     def test_dashboard_terminal_enter_failure_leaves_alternate_screen(self):
         stdin = self.FakeTTY(tty=True)
@@ -3081,7 +3165,8 @@ class NasberryTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertFalse(terminal.navigation_active)
         self.assertFalse(terminal.alternate_active)
-        self.assertEqual(output.writes, ["\033[?1049h", "\033[?1049l"])
+        self.assertFalse(terminal.cursor_hidden)
+        self.assertEqual(output.writes, ["\033[?1049h", "\033[?25l", "\033[?25h", "\033[?1049l"])
         setattrs.assert_not_called()
 
     def test_dashboard_terminal_alternate_enter_flush_failure_allows_cleanup(self):
@@ -3764,9 +3849,44 @@ class NasberryTests(unittest.TestCase):
         service_active.assert_not_called()
         connection_info.assert_not_called()
 
+    def test_status_reports_offline_and_suppresses_connection_info_when_smbd_active_but_storage_unmounted(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "service_active", return_value=True), \
+             mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=False), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=None), \
+             mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="safely unmounted"), \
+             mock.patch.object(nasberrypi, "disk_usage", return_value="Not mounted"), \
+             mock.patch.object(nasberrypi, "print_connection_info") as connection_info, \
+             mock.patch("builtins.print") as output:
+            nasberrypi.status()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Mount state    : safely unmounted", rendered)
+        self.assertIn("File sharing   : sharing offline", rendered)
+        self.assertIn("Enabled shares : 1", rendered)
+        self.assertNotIn("sharing online", rendered)
+        connection_info.assert_not_called()
+
+    def test_status_reports_offline_when_storage_mounted_but_smbd_inactive(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "service_active", return_value=False), \
+             mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=nasberrypi.MOUNT_POINT), \
+             mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="mounted in NAS mode"), \
+             mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free"), \
+             mock.patch.object(nasberrypi, "print_connection_info") as connection_info, \
+             mock.patch("builtins.print") as output:
+            nasberrypi.status()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("File sharing   : sharing offline", rendered)
+        self.assertIn("Enabled shares : 1", rendered)
+        connection_info.assert_not_called()
+
     def test_status_enabled_active_preserves_online_output(self):
         with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
              mock.patch.object(nasberrypi, "service_active", return_value=True), \
+             mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
              mock.patch.object(nasberrypi, "device_exists", return_value=True), \
              mock.patch.object(nasberrypi, "active_mount_point", return_value=nasberrypi.MOUNT_POINT), \
              mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="mounted in NAS mode"), \

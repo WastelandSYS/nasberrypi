@@ -146,6 +146,24 @@ Nasberry currently supports Debian-family systems that provide `apt-get`, includ
 
 ---
 
+# UPGRADE
+
+Update the repository, reinstall the application files, repair or migrate Nasberry-owned Samba state, then run diagnostics:
+
+```bash
+cd nasberrypi
+git pull
+sudo ./install.sh
+sudo nasberry repair-samba
+sudo nasberry doctor
+```
+
+Rerunning `install.sh` replaces Nasberry application files and command links. It preserves `/etc/nasberry/config.ini`, preserves `/etc/nasberry/shares.json`, does not delete storage data, and does not replace your entire Samba configuration.
+
+`sudo nasberry repair-samba` updates or migrates recognized Nasberry-owned Samba settings through Nasberry's backup-safe, candidate-validated writer. If `/etc/nasberry/shares.json` is genuinely missing, repair can reconstruct it only when historical Nasberry evidence proves the old installation used the default `Public` share layout. Ambiguous or custom legacy share state is refused instead of guessed; restore `/etc/nasberry/shares.json` from backup or run `sudo nasberry setup`.
+
+---
+
 # UNINSTALLATION
 
 ```bash
@@ -153,7 +171,7 @@ cd nasberrypi
 sudo ./uninstall.sh
 ```
 
-The uninstaller removes the global `nasberry` shortcut and related application files. It does not remove your cloned repository folder.
+The normal uninstaller removes Nasberry application files and Nasberry-owned command links. It preserves `/etc/nasberry`, Samba configuration, storage data, installed packages, and your cloned repository folder. It does not stop Samba or unmount storage automatically.
 
 Preview an uninstall without changing the system:
 
@@ -161,7 +179,9 @@ Preview an uninstall without changing the system:
 sudo ./uninstall.sh --dry-run
 ```
 
-Use `--purge` to also remove Nasberry's configuration and managed Samba settings. Storage data is never deleted. Run `sudo ./uninstall.sh --help` for all options.
+Use `--purge` to also remove `/etc/nasberry` and recognized Nasberry-owned Samba settings. Purge creates a Samba backup such as `/etc/samba/smb.conf.nasberry-uninstall.<timestamp>.bak`, validates the cleanup candidate before replacement, and preserves unrelated Samba configuration. Storage data is never deleted.
+
+Use `--remove-mount-point` to remove the mount-point directory only when it is unmounted and empty. Run `sudo ./uninstall.sh --help` for all options.
 
 ---
 
@@ -208,6 +228,8 @@ smb://hostname/Public
 ```bash
 sudo nasberry shares
 ```
+
+All managed shares may be disabled. In that state Nasberry exports no managed shared folders, and `sudo nasberry online` or Start Share will refuse to report normal Nasberry sharing online until at least one share is enabled. Re-enable or create a share with `sudo nasberry shares`.
 
 Android:
 
@@ -265,7 +287,7 @@ Main management functions:
 | Stop Share       | Disable network file sharing           |
 | Manage Shares    | Add, remove, enable, disable, or toggle read-only shared folders |
 | Repair Samba     | Repair Samba configuration             |
-| Safe Mode CLI    | Disable automatic sharing services     |
+| Safe Mode CLI    | Explicitly disable sharing services    |
 | Panic Lock       | Immediate shutdown of sharing services |
 | Status Dashboard | View NAS health and status             |
 
@@ -284,6 +306,8 @@ sudo nasberry storage
 This reports the configured storage device, whether it is present, its filesystem, mount state, active mount point, configured Nasberry mount point, and disk space. Mount state is reported as **mounted in NAS mode**, **mounted elsewhere**, or **safely unmounted**.
 
 If `nasberry mount` finds the configured drive mounted elsewhere, interactive use shows the current and configured Nasberry mount points and asks before moving the drive into NAS mode. Press Enter or answer `n` to leave the existing mount untouched.
+
+When `safe_mode_on_start=true`, automatic Safe Mode enforcement runs before entering the interactive dashboard with bare `sudo nasberry`. Explicit commands such as `status`, `doctor`, `online`, `setup`, `repair-samba`, and `shares` do not receive surprise startup Safe Mode enforcement. Use `sudo nasberry safe-mode --yes` to explicitly stop and disable configured sharing services once.
 
 ---
 
@@ -319,14 +343,14 @@ Notes:
 * ext4 is the recommended filesystem for Linux-based NAS deployments.
 * Desktop environments may mount a configured drive outside the Nasberry mount point. Nasberry reports this as **mounted elsewhere** and asks before moving it into NAS mode.
 * Setup creates a default `Public` share and stores managed shared folders in `/etc/nasberry/shares.json`.
-* Nasberry updates only the clearly marked NasberryPi section in `/etc/samba/smb.conf`. The previous file is backed up before changes, and unrelated Samba configuration is preserved.
+* Nasberry manages only recognized Nasberry-owned Samba settings. Modern installations use a clearly marked NasberryPi section in `/etc/samba/smb.conf`; upgrade repair can migrate known legacy Nasberry formats while preserving unrelated Samba configuration.
 * Network share discovery behavior may vary by operating system.
 
 ---
 
 # RECOVERY
 
-Nasberry validates a candidate Samba configuration before replacing the live configuration and saves the previous configuration as `/etc/samba/smb.conf.nasberry.<timestamp>.bak`.
+Nasberry validates a candidate Samba configuration before replacing the live configuration and saves the previous configuration as `/etc/samba/smb.conf.nasberry.<timestamp>.bak`. Purge/uninstall Samba cleanup uses backups named `/etc/samba/smb.conf.nasberry-uninstall.<timestamp>.bak`.
 
 To inspect available backups:
 
@@ -344,7 +368,9 @@ sudo testparm -s /etc/samba/smb.conf
 sudo systemctl restart smbd
 ```
 
-Nasberry's core configuration is stored at `/etc/nasberry/config.ini`, and managed shared folders are stored at `/etc/nasberry/shares.json`. Run `sudo nasberry doctor` for diagnostics, `sudo nasberry shares` to manage folders, or `sudo nasberry repair-samba` to recreate and validate the managed Samba section.
+Nasberry's system configuration is stored at `/etc/nasberry/config.ini`, and managed shared folders are stored at `/etc/nasberry/shares.json`. Run `sudo nasberry doctor` for diagnostics, `sudo nasberry shares` to manage folders, or `sudo nasberry repair-samba` to recreate and validate the managed Samba section.
+
+Privileged commands should be run with `sudo` to operate on the system NAS configuration under `/etc/nasberry`. A non-root `nasberry` invocation uses the current user's `~/.config/nasberry/config.ini` and `~/.config/nasberry/shares.json`, so it may not show the root-managed system NAS state.
 
 ---
 
