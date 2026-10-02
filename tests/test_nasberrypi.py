@@ -239,9 +239,69 @@ class NasberryTests(unittest.TestCase):
         self.assertNotIn("[Private]", config)
         self.assertNotIn("[Backups]", config)
 
+    def test_appliance_config_supports_empty_managed_section(self):
+        with mock.patch.object(nasberrypi, "load_shares", return_value=[]):
+            config = nasberrypi.appliance_samba_config()
+        self.assertIn(nasberrypi.NASBERRY_SAMBA_BEGIN, config)
+        self.assertIn(nasberrypi.NASBERRY_SAMBA_END, config)
+        self.assertNotIn("[Public]", config)
+
+    def test_managed_samba_share_names_parses_only_managed_block(self):
+        text = f"""[OtherShare]
+   path = /srv/other
+
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+# Managed by NasberryPi. Edit with 'sudo nasberry shares'.
+[Public]
+   path = /mnt/nasberry/Public
+[Media]
+   path = /mnt/nasberry/Media
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+        ok, names, reason = nasberrypi.managed_samba_share_names(text)
+        self.assertTrue(ok, reason)
+        self.assertEqual(names, ["Public", "Media"])
+
+    def test_managed_samba_share_names_accepts_empty_block_and_ignores_unrelated_shares(self):
+        text = f"""[OtherShare]
+   path = /srv/other
+
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+# Managed by NasberryPi. Edit with 'sudo nasberry shares'.
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+        ok, names, reason = nasberrypi.managed_samba_share_names(text)
+        self.assertTrue(ok, reason)
+        self.assertEqual(names, [])
+
+    def test_managed_samba_share_names_rejects_missing_malformed_and_duplicate_markers(self):
+        cases = (
+            "[Public]\npath = /mnt/nasberry/Public\n",
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n[Public]\n",
+            f"[Public]\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_END}\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_END}\n{nasberrypi.NASBERRY_SAMBA_BEGIN}\n",
+        )
+        for text in cases:
+            ok, _names, reason = nasberrypi.managed_samba_share_names(text)
+            self.assertFalse(ok, text)
+            self.assertNotEqual(reason, "ok")
+
+    def test_managed_samba_share_names_rejects_duplicate_share_headers_case_insensitively(self):
+        text = f"""{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Public]
+[public]
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+        ok, _names, reason = nasberrypi.managed_samba_share_names(text)
+        self.assertFalse(ok)
+        self.assertIn("duplicate", reason)
+
     @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
     @mock.patch.object(nasberrypi, "samba_shares")
-    def test_samba_config_accepts_public_only(self, samba_shares, _load_shares):
+    def test_samba_config_accepts_public_only(self, samba_shares, _managed, _load_shares):
         samba_shares.return_value = {"Public": {"path": nasberrypi.public_share_path(), "available": "yes"}}
         self.assertEqual(nasberrypi.samba_config_valid(), (True, "1 enabled share(s) configured"))
 
@@ -269,8 +329,9 @@ class NasberryTests(unittest.TestCase):
             self.assertIn("under", reason)
 
     @mock.patch.object(nasberrypi, "load_shares")
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public", "Media"], "ok"))
     @mock.patch.object(nasberrypi, "samba_shares")
-    def test_samba_config_accepts_multiple_enabled_shares(self, samba_shares, load_shares):
+    def test_samba_config_accepts_multiple_enabled_shares(self, samba_shares, _managed, load_shares):
         load_shares.return_value = [
             {"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False},
             {"name": "Media", "path": "/mnt/nasberry/Media", "enabled": True, "read_only": True},
@@ -283,16 +344,18 @@ class NasberryTests(unittest.TestCase):
         self.assertEqual(nasberrypi.samba_config_valid(), (True, "2 enabled share(s) configured"))
 
     @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
     @mock.patch.object(nasberrypi, "samba_shares")
-    def test_samba_config_rejects_mount_root(self, samba_shares, _load_shares):
+    def test_samba_config_rejects_mount_root(self, samba_shares, _managed, _load_shares):
         samba_shares.return_value = {"Public": {"path": nasberrypi.MOUNT_POINT, "available": "yes"}}
         valid, reason = nasberrypi.samba_config_valid()
         self.assertFalse(valid)
         self.assertIn(nasberrypi.public_share_path(), reason)
 
     @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
     @mock.patch.object(nasberrypi, "samba_shares")
-    def test_samba_config_ignores_unrelated_active_share(self, samba_shares, _load_shares):
+    def test_samba_config_ignores_unrelated_active_share(self, samba_shares, _managed, _load_shares):
         samba_shares.return_value = {
             "homes": {"available": "yes"},
             "Public": {"path": nasberrypi.public_share_path(), "available": "yes"},
@@ -300,6 +363,51 @@ class NasberryTests(unittest.TestCase):
         valid, reason = nasberrypi.samba_config_valid()
         self.assertTrue(valid)
         self.assertIn("enabled share", reason)
+
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, [], "ok"))
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={"OtherShare": {"path": "/srv/other"}})
+    def test_samba_config_accepts_zero_enabled_empty_managed_section(self, _samba_shares, _managed, _load_shares):
+        self.assertEqual(nasberrypi.samba_config_valid(), (True, "0 enabled share(s) configured"))
+
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={"Public": {"path": "/mnt/nasberry/Public"}})
+    def test_samba_config_rejects_stale_managed_share_when_zero_enabled(self, _samba_shares, _managed, _load_shares):
+        valid, reason = nasberrypi.samba_config_valid()
+        self.assertFalse(valid)
+        self.assertIn("stale managed share", reason)
+
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[
+        {"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False},
+        {"name": "Media", "path": "/mnt/nasberry/Media", "enabled": False, "read_only": False},
+    ])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={"Public": {"path": "/mnt/nasberry/Public", "read only": "no"}})
+    def test_samba_config_accepts_disabled_share_absent_from_managed_section(self, _samba_shares, _managed, _load_shares):
+        self.assertEqual(nasberrypi.samba_config_valid(), (True, "1 enabled share(s) configured"))
+
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[
+        {"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False},
+        {"name": "Media", "path": "/mnt/nasberry/Media", "enabled": False, "read_only": False},
+    ])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public", "Media"], "ok"))
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={
+        "Public": {"path": "/mnt/nasberry/Public", "read only": "no"},
+        "Media": {"path": "/mnt/nasberry/Media", "read only": "no"},
+    })
+    def test_samba_config_rejects_disabled_stale_managed_share(self, _samba_shares, _managed, _load_shares):
+        valid, reason = nasberrypi.samba_config_valid()
+        self.assertFalse(valid)
+        self.assertIn("stale managed share", reason)
+
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(False, [], "Nasberry managed Samba section was not found"))
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={"Public": {"path": "/mnt/nasberry/Public"}})
+    def test_samba_config_rejects_missing_managed_markers(self, _samba_shares, _managed, _load_shares):
+        valid, reason = nasberrypi.samba_config_valid()
+        self.assertFalse(valid)
+        self.assertIn("managed Samba section", reason)
 
     @mock.patch.object(nasberrypi, "load_shares", side_effect=nasberrypi.ShareConfigError("invalid shares"))
     @mock.patch.object(nasberrypi, "samba_shares", return_value={})
@@ -650,9 +758,43 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "service_exists", return_value=True)
     def test_start_share_refuses_busy_mount_point_with_wrong_device(self, _service, _nas_mount, _mounted, mount_storage):
         mount_storage.return_value = False
-        with mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
             self.assertFalse(nasberrypi.start_share())
         mount_storage.assert_called_once_with()
+
+    def test_start_share_refuses_zero_enabled_shares_before_side_effects(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[]), \
+             mock.patch.object(nasberrypi, "service_exists") as service_exists, \
+             mock.patch.object(nasberrypi, "share_user_preflight") as user_preflight, \
+             mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+             mock.patch.object(nasberrypi, "ensure_public_folder") as ensure_public, \
+             mock.patch.object(nasberrypi, "run") as run, \
+             mock.patch.object(nasberrypi, "write_state") as write_state, \
+             mock.patch("builtins.print") as output:
+            self.assertFalse(nasberrypi.start_share())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("No Nasberry shared folders are enabled", rendered)
+        self.assertIn("sudo nasberry shares", rendered)
+        service_exists.assert_not_called()
+        user_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_public.assert_not_called()
+        run.assert_not_called()
+        write_state.assert_not_called()
+
+    def test_start_share_refuses_broken_share_config_before_mounting(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", side_effect=nasberrypi.ShareConfigError("invalid shares")), \
+             mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+             mock.patch.object(nasberrypi, "ensure_public_folder") as ensure_public, \
+             mock.patch.object(nasberrypi, "run") as run, \
+             mock.patch("builtins.print") as output:
+            self.assertFalse(nasberrypi.start_share())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Share configuration error: invalid shares", rendered)
+        mount_storage.assert_not_called()
+        ensure_public.assert_not_called()
+        run.assert_not_called()
 
     @mock.patch.object(nasberrypi, "run")
     @mock.patch.object(nasberrypi, "service_active", return_value=False)
@@ -864,6 +1006,45 @@ class NasberryTests(unittest.TestCase):
                  mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
                 self.assertFalse(nasberrypi.configure_samba_share())
             self.assertEqual(smb_file.read_text(), "original config")
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "samba_shares", return_value={"OtherShare": {"path": "/srv/other"}})
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[
+        {"name": "Public", "path": "/mnt/nasberry/Public", "enabled": False, "read_only": False}
+    ])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_writes_empty_managed_section_for_zero_enabled(self, run, _load_shares, _samba_shares, _preflight):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = ""
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(
+                f"""[global]
+   workgroup = WORKGROUP
+
+[OtherShare]
+   path = /srv/other
+
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+# Managed by NasberryPi. Edit with 'sudo nasberry shares'.
+[Public]
+   path = /mnt/nasberry/Public
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+            )
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
+                self.assertTrue(nasberrypi.configure_samba_share())
+            updated = smb_file.read_text()
+            self.assertIn("[OtherShare]", updated)
+            self.assertIn(nasberrypi.NASBERRY_SAMBA_BEGIN, updated)
+            self.assertIn(nasberrypi.NASBERRY_SAMBA_END, updated)
+            managed = updated.split(nasberrypi.NASBERRY_SAMBA_BEGIN, 1)[1].split(nasberrypi.NASBERRY_SAMBA_END, 1)[0]
+            self.assertNotIn("[Public]", managed)
+            self.assertTrue(list(Path(directory).glob("smb.conf.nasberry.*.bak")))
+        self.assertEqual(run.call_args.args[0][:2], ["testparm", "-s"])
 
     @mock.patch.object(nasberrypi, "share_user_preflight")
     @mock.patch.object(nasberrypi, "samba_config_preflight")
@@ -1091,6 +1272,7 @@ class NasberryTests(unittest.TestCase):
 
         with mock.patch.object(nasberrypi, "check", side_effect=fake_check), \
              mock.patch.object(nasberrypi, "section_header"), \
+             mock.patch.object(nasberrypi.os.path, "isdir", return_value=True), \
              mock.patch.object(nasberrypi, "device_exists", return_value=True), \
              mock.patch.object(nasberrypi, "storage_mount_state", return_value="safely_unmounted"), \
              mock.patch.object(nasberrypi, "active_mount_point", return_value=""), \
@@ -1108,6 +1290,34 @@ class NasberryTests(unittest.TestCase):
         self.assertFalse(share_check[1])
         self.assertIn("invalid JSON", share_check[2])
         self.assertIn(str(nasberrypi.SHARES_FILE), share_check[3])
+
+    def test_doctor_treats_zero_enabled_shares_as_valid_configuration(self):
+        checks = []
+
+        def fake_check(label, ok, detail, fix="", label_width=22):
+            checks.append((label, ok, detail, fix))
+            return ok
+
+        with mock.patch.object(nasberrypi, "check", side_effect=fake_check), \
+             mock.patch.object(nasberrypi, "section_header"), \
+             mock.patch.object(nasberrypi.os.path, "isdir", return_value=True), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "storage_mount_state", return_value="safely_unmounted"), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=""), \
+             mock.patch.object(nasberrypi, "protected_folder_status", return_value=(True, "protected")), \
+             mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "0 enabled share(s) configured")), \
+             mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "enabled")), \
+             mock.patch.object(nasberrypi, "load_shares", return_value=[]), \
+             mock.patch.object(nasberrypi, "command_exists", return_value=True), \
+             mock.patch.object(nasberrypi.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(nasberrypi, "service_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "print_connection_info"), \
+             mock.patch("builtins.print"):
+            self.assertTrue(nasberrypi.doctor())
+        share_check = next(item for item in checks if item[0] == "Share configuration")
+        self.assertTrue(share_check[1])
+        self.assertIn("0 enabled of 0 configured", share_check[2])
+        self.assertIn("no Nasberry shares enabled", share_check[2])
 
     def test_doctor_reports_missing_share_configuration_with_setup_guidance(self):
         checks = []
@@ -1469,6 +1679,18 @@ class NasberryTests(unittest.TestCase):
         rendered = "\n".join(nasberrypi.menu_status_lines())
         self.assertIn("share config error", rendered)
         self.assertNotIn("1 enabled share(s)", rendered)
+
+    @mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free of 20 GB")
+    @mock.patch.object(nasberrypi, "enabled_shares", return_value=[])
+    @mock.patch.object(nasberrypi, "service_active", return_value=True)
+    @mock.patch.object(nasberrypi, "menu_mount_status", return_value=("● mounted in NAS mode", "/mnt/nasberry"))
+    @mock.patch.object(nasberrypi, "device_exists", return_value=True)
+    def test_menu_status_zero_enabled_does_not_claim_sharing_online(self, _device, _mount, service_active, _enabled, _usage):
+        rendered = "\n".join(nasberrypi.menu_status_lines())
+        self.assertIn("no shares enabled", rendered)
+        self.assertIn("0 enabled share(s)", rendered)
+        self.assertNotIn("sharing online", rendered)
+        service_active.assert_not_called()
 
     def test_menu_status_reports_missing_main_config_without_defaults(self):
         with mock.patch.object(nasberrypi, "CONFIG_STATUS", "missing"), \
@@ -2049,6 +2271,25 @@ class NasberryTests(unittest.TestCase):
         self.assertEqual(nasberrypi.local_addresses(), ["192.168.1.25"])
         run.assert_called_once_with(["ip", "-json", "-4", "address", "show", "scope", "global"])
 
+    def test_connection_info_suppresses_public_hint_when_zero_enabled(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[]), \
+             mock.patch.object(nasberrypi, "local_addresses") as addresses, \
+             mock.patch("builtins.print") as output:
+            nasberrypi.print_connection_info()
+        addresses.assert_not_called()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("no Nasberry shared folders are enabled", rendered)
+        self.assertNotIn("Public", rendered)
+
+    def test_connection_info_preserves_existing_output_when_enabled(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "local_addresses", return_value=["192.168.1.25"]), \
+             mock.patch("builtins.print") as output:
+            nasberrypi.print_connection_info()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn(r"\\192.168.1.25\Public", rendered)
+        self.assertIn("smb://192.168.1.25/Public", rendered)
+
     @mock.patch.object(nasberrypi, "run")
     @mock.patch.object(nasberrypi, "command_exists", return_value=True)
     def test_lsblk_devices_excludes_swap_and_zram(self, _command_exists, run):
@@ -2316,13 +2557,16 @@ class NasberryTests(unittest.TestCase):
     def test_start_share_refuses_when_share_folders_are_not_safe(
         self, _service, _nas_mount, _mount_storage, _ensure_public, samba_valid, run
     ):
-        with mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), mock.patch("builtins.print"):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.start_share())
         samba_valid.assert_not_called()
         run.assert_not_called()
 
     def test_start_share_missing_linux_user_blocks_mount_and_state_write(self):
         with mock.patch.object(nasberrypi, "SHARE_USER", "deleteduser"), \
+             mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
              mock.patch.object(nasberrypi, "service_exists", return_value=True), \
              mock.patch.object(nasberrypi.pwd, "getpwnam", side_effect=KeyError), \
              mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
@@ -2341,6 +2585,7 @@ class NasberryTests(unittest.TestCase):
 
     def test_start_share_missing_linux_user_blocks_already_mounted_path(self):
         with mock.patch.object(nasberrypi, "SHARE_USER", "deleteduser"), \
+             mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
              mock.patch.object(nasberrypi, "service_exists", return_value=True), \
              mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
              mock.patch.object(nasberrypi.pwd, "getpwnam", side_effect=KeyError), \
@@ -2357,6 +2602,7 @@ class NasberryTests(unittest.TestCase):
 
     def test_start_share_existing_linux_user_allows_normal_path(self):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+             mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
              mock.patch.object(nasberrypi, "service_exists", return_value=True), \
              mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=True), \
              mock.patch.object(nasberrypi.pwd, "getpwnam", return_value=mock.Mock(pw_uid=1000, pw_gid=1000)), \
@@ -2381,6 +2627,38 @@ class NasberryTests(unittest.TestCase):
         rendered = "\n".join(call.args[0] for call in output.call_args_list)
         self.assertIn("Configuration : missing", rendered)
         self.assertNotIn(nasberrypi.DEFAULTS["device"], rendered)
+
+    def test_status_zero_enabled_does_not_claim_sharing_online(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[]), \
+             mock.patch.object(nasberrypi, "service_active", return_value=True) as service_active, \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=nasberrypi.MOUNT_POINT), \
+             mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="mounted in NAS mode"), \
+             mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free"), \
+             mock.patch.object(nasberrypi, "print_connection_info") as connection_info, \
+             mock.patch("builtins.print") as output:
+            nasberrypi.status()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("File sharing   : no shares enabled", rendered)
+        self.assertIn("Enabled shares : 0", rendered)
+        self.assertNotIn("sharing online", rendered)
+        service_active.assert_not_called()
+        connection_info.assert_not_called()
+
+    def test_status_enabled_active_preserves_online_output(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", return_value=[nasberrypi.default_share()]), \
+             mock.patch.object(nasberrypi, "service_active", return_value=True), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=nasberrypi.MOUNT_POINT), \
+             mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="mounted in NAS mode"), \
+             mock.patch.object(nasberrypi, "disk_usage", return_value="10 GB free"), \
+             mock.patch.object(nasberrypi, "print_connection_info") as connection_info, \
+             mock.patch("builtins.print") as output:
+            nasberrypi.status()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("File sharing   : sharing online", rendered)
+        self.assertIn("Enabled shares : 1", rendered)
+        connection_info.assert_called_once_with()
 
     def test_storage_info_reports_invalid_config_without_using_defaults(self):
         with mock.patch.object(nasberrypi, "CONFIG_STATUS", "invalid"), \
@@ -2629,6 +2907,77 @@ class NasberryTests(unittest.TestCase):
                 self.assertTrue(nasberrypi.setup(non_interactive=True, skip_pin=True, share_user_arg="sparkles"))
             self.assertEqual(shares_file.read_text(), custom)
         mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=False)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_successful_interactive_setup_suppresses_public_hint_when_zero_enabled(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        password_result = mock.Mock(returncode=0)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(nasberrypi, "config", config))
+            stack.enter_context(mock.patch.object(nasberrypi, "settings", config["nasberry"]))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_ERROR", None))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None))
+            stack.enter_context(mock.patch.object(nasberrypi, "choose_device", return_value=selected))
+            stack.enter_context(mock.patch.object(nasberrypi, "setup_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "setup_share_config_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_default_shares_file", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "share_config_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "save_config"))
+            stack.enter_context(mock.patch.object(nasberrypi, "publish_config_from_disk", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "mount_storage", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "configure_samba_share", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "command_exists", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi.subprocess, "run", return_value=password_result))
+            stack.enter_context(mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "enabled")))
+            stack.enter_context(mock.patch.object(nasberrypi, "restart_samba_service", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "enabled_shares", return_value=[]))
+            hint = stack.enter_context(mock.patch.object(nasberrypi, "print_windows_credential_hint"))
+            stack.enter_context(mock.patch("builtins.input", return_value="sparkles"))
+            stack.enter_context(mock.patch.object(nasberrypi.getpass, "getpass", side_effect=["1234", "1234"]))
+            stack.enter_context(mock.patch("builtins.print"))
+            self.assertTrue(nasberrypi.setup(non_interactive=False, skip_pin=False))
+        hint.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_successful_setup_does_not_raise_when_connection_hint_share_check_fails(self, _geteuid):
+        selected = {"path": "/dev/sdz1", "uuid": "abc-123", "fstype": "ext4"}
+        config = nasberrypi.default_config()
+        password_result = mock.Mock(returncode=0)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(nasberrypi, "config", config))
+            stack.enter_context(mock.patch.object(nasberrypi, "settings", config["nasberry"]))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_STATUS", "valid"))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_ERROR", None))
+            stack.enter_context(mock.patch.object(nasberrypi, "CONFIG_RUNTIME_ERROR", None))
+            stack.enter_context(mock.patch.object(nasberrypi, "choose_device", return_value=selected))
+            stack.enter_context(mock.patch.object(nasberrypi, "setup_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "setup_share_config_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_default_shares_file", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "share_config_preflight", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "save_config"))
+            stack.enter_context(mock.patch.object(nasberrypi, "publish_config_from_disk", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "mount_storage", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "configure_samba_share", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "command_exists", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi.subprocess, "run", return_value=password_result))
+            stack.enter_context(mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "enabled")))
+            stack.enter_context(mock.patch.object(nasberrypi, "restart_samba_service", return_value=True))
+            stack.enter_context(mock.patch.object(nasberrypi, "enabled_shares", side_effect=nasberrypi.ShareConfigError("changed after setup")))
+            hint = stack.enter_context(mock.patch.object(nasberrypi, "print_windows_credential_hint"))
+            stack.enter_context(mock.patch("builtins.input", return_value="sparkles"))
+            stack.enter_context(mock.patch.object(nasberrypi.getpass, "getpass", side_effect=["1234", "1234"]))
+            output = stack.enter_context(mock.patch("builtins.print"))
+            self.assertTrue(nasberrypi.setup(non_interactive=False, skip_pin=False))
+        hint.assert_not_called()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Connection help unavailable", rendered)
+        self.assertIn("changed after setup", rendered)
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_setup_bootstraps_missing_shares_then_validates_before_mounting(self, _geteuid):

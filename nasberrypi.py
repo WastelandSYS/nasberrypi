@@ -863,31 +863,83 @@ def samba_shares():
     return shares
 
 
+def managed_samba_share_names(text=None):
+    if text is None:
+        smb_file = Path("/etc/samba/smb.conf")
+        try:
+            text = smb_file.read_text()
+        except OSError as exc:
+            return False, [], f"could not read Samba configuration {smb_file}: {exc}"
+    lines = text.splitlines()
+    begins = [index for index, line in enumerate(lines) if line.strip() == NASBERRY_SAMBA_BEGIN]
+    ends = [index for index, line in enumerate(lines) if line.strip() == NASBERRY_SAMBA_END]
+    if not begins and not ends:
+        return False, [], "Nasberry managed Samba section was not found"
+    if len(begins) != 1 or len(ends) != 1:
+        return False, [], "Nasberry managed Samba section markers are malformed"
+    begin, end = begins[0], ends[0]
+    if begin >= end:
+        return False, [], "Nasberry managed Samba section markers are out of order"
+    names = []
+    seen = set()
+    for raw_line in lines[begin + 1:end]:
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip()
+            key = name.lower()
+            if key in seen:
+                return False, [], f"duplicate Nasberry managed Samba share: {name}"
+            seen.add(key)
+            names.append(name)
+    return True, names, "ok"
+
+
 def samba_config_valid():
     shares = samba_shares()
     if shares is None:
         return False, "testparm could not read the Samba configuration"
     try:
-        expected = {share["name"]: share for share in enabled_shares()}
+        expected = {share["name"].lower(): share for share in enabled_shares()}
     except ShareConfigError as exc:
         return False, str(exc)
-    if not expected:
-        return False, "no enabled Nasberry shares"
-    for name, share in expected.items():
-        configured = shares.get(name)
+    managed_ok, managed_names, managed_reason = managed_samba_share_names()
+    if not managed_ok:
+        return False, managed_reason
+    managed = {name.lower(): name for name in managed_names}
+    if set(managed) != set(expected):
+        missing = [expected[key]["name"] for key in expected if key not in managed]
+        stale = [managed[key] for key in managed if key not in expected]
+        detail = []
+        if missing:
+            detail.append(f"missing managed share(s): {', '.join(missing)}")
+        if stale:
+            detail.append(f"stale managed share(s): {', '.join(stale)}")
+        return False, "; ".join(detail)
+    actual = {name.lower(): values for name, values in shares.items()}
+    for key, share in expected.items():
+        configured = actual.get(key)
         if not configured:
-            return False, f"share [{name}] was not found"
+            return False, f"share [{share['name']}] was not found"
         configured_path = configured.get("path", "")
         if os.path.abspath(configured_path) != os.path.abspath(share["path"]):
-            return False, f"share [{name}] points to {configured_path or 'no path'}, not {share['path']}"
+            return False, f"share [{share['name']}] points to {configured_path or 'no path'}, not {share['path']}"
         read_only = configured.get("read only", "no").lower() in {"yes", "true"}
         if read_only != bool(share.get("read_only")):
-            return False, f"share [{name}] read-only setting does not match Nasberry config"
+            return False, f"share [{share['name']}] read-only setting does not match Nasberry config"
     return True, f"{len(expected)} enabled share(s) configured"
 
 
 def start_share():
     operation_header("START SHARING", "Bringing Nasberry shared folders online")
+    try:
+        enabled = enabled_shares()
+    except ShareConfigError as exc:
+        log(f"✖ Share configuration error: {exc}")
+        return False
+    if not enabled:
+        log("✖ No Nasberry shared folders are enabled.")
+        log("Enable or create one with 'sudo nasberry shares'.")
+        return False
     if not service_exists(SAMBA_SERVICE):
         log(f"✖ Samba service '{SAMBA_SERVICE}' was not found. Run 'nasberry doctor'.")
         write_state(is_mounted(), False)
@@ -1028,6 +1080,13 @@ def local_addresses():
 
 
 def print_connection_info():
+    try:
+        if not enabled_shares():
+            print("\nConnection information: no Nasberry shared folders are enabled.")
+            return
+    except ShareConfigError as exc:
+        print(f"\nConnection information unavailable: {exc}")
+        return
     addresses = local_addresses()
     if not addresses:
         log("Network address unavailable; run 'nasberry doctor'.")
@@ -1178,7 +1237,10 @@ def doctor():
         try:
             shares = load_shares()
             enabled = [share for share in shares if share.get("enabled", True)]
-            results.append(check("Share configuration", bool(enabled), f"{len(enabled)} enabled of {len(shares)} configured", "Run 'sudo nasberry shares'.", label_width))
+            detail = f"{len(enabled)} enabled of {len(shares)} configured"
+            if not enabled:
+                detail = f"{detail}; no Nasberry shares enabled"
+            results.append(check("Share configuration", True, detail, label_width=label_width))
             for share in enabled:
                 share_ok, share_detail = share_folder_status(share)
                 results.append(check(f"[{share['name']}] folder", share_ok, share_detail, "Run 'sudo nasberry repair-samba' to repair it.", label_width))
@@ -1633,7 +1695,13 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
     if configured:
         log(f"✔ Setup complete; configuration saved to {CONFIG_FILE}")
         if password_updated:
-            print_windows_credential_hint()
+            try:
+                has_enabled_shares = bool(enabled_shares())
+            except ShareConfigError as exc:
+                log(f"⚠ Connection help unavailable: {exc}")
+                has_enabled_shares = False
+            if has_enabled_shares:
+                print_windows_credential_hint()
     else:
         log(f"✖ Setup incomplete. Core settings were saved to {CONFIG_FILE}, but Samba is not ready.")
         log("Update/reinstall Nasberry, then run 'sudo nasberry repair-samba'.")
@@ -1740,14 +1808,16 @@ def menu_status_lines():
         ]
     present = device_exists()
     mount_state, mount_location = menu_mount_status()
-    sharing = service_active()
     try:
-        share_detail = f"{len(enabled_shares())} enabled share(s)"
+        enabled_count = len(enabled_shares())
+        share_detail = f"{enabled_count} enabled share(s)"
+        sharing_text = "○ no shares enabled" if enabled_count == 0 else ("● sharing online" if service_active() else "○ sharing offline")
     except ShareConfigError:
         share_detail = "share config error"
+        sharing_text = "✖ share config error"
     return [
         f"Storage      {'● present' if present else '○ missing'}   {mount_state}",
-        f"Sharing      {'● sharing online' if sharing else '○ sharing offline'}   {share_detail}",
+        f"Sharing      {sharing_text}   {share_detail}",
         f"Mount point  {mount_location}",
         f"Share user   {SHARE_USER or 'not configured'}",
         "Share mode   Multiple shared folders",
@@ -1931,20 +2001,24 @@ def status():
         if fix:
             print(f"Next step     : {fix}")
         return False
+    try:
+        enabled = enabled_shares()
+        share_count = str(len(enabled))
+        sharing_text = "no shares enabled" if not enabled else ("sharing online" if service_active() else "sharing offline")
+    except ShareConfigError as exc:
+        enabled = None
+        share_count = f"configuration error: {exc}"
+        sharing_text = "share config error"
     print(f"Storage device : {DEVICE} ({'present' if device_exists() else 'missing'})")
     mount_point = active_mount_point()
     print(f"Mount state    : {storage_mount_state_label()}")
-    print(f"File sharing   : {'sharing online' if service_active() else 'sharing offline'}")
+    print(f"File sharing   : {sharing_text}")
     print("Share mode     : Multiple shared folders")
-    try:
-        share_count = str(len(enabled_shares()))
-    except ShareConfigError as exc:
-        share_count = f"configuration error: {exc}"
     print(f"Enabled shares : {share_count}")
     print(f"Disk space     : {disk_usage()}")
     print(f"Mount point    : {mount_point or MOUNT_POINT}")
     print(f"Share user     : {SHARE_USER or 'not configured'}")
-    if service_active():
+    if enabled and service_active():
         print_connection_info()
 
 def storage_info():
