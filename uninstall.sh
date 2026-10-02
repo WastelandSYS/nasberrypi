@@ -84,6 +84,56 @@ run_action() {
     fi
 }
 
+remove_command_link() {
+    local path="$1"
+    local target="$INSTALL_DIR/nasberrypi.py"
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        return 0
+    fi
+    if [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ]; then
+        run_action rm -f -- "$path"
+        return 0
+    fi
+    log "WARNING: Not removing $path because it is not Nasberry's command link."
+}
+
+remove_known_install_file() {
+    local path="$1"
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        return 0
+    fi
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+        log "WARNING: Not removing $path because it is not a Nasberry application file."
+        return 0
+    fi
+    run_action rm -f -- "$path"
+}
+
+remove_application_files() {
+    if [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+        return 0
+    fi
+    if [ -L "$INSTALL_DIR" ]; then
+        log "WARNING: Not removing $INSTALL_DIR because it is a symbolic link."
+        return 0
+    fi
+    if [ ! -d "$INSTALL_DIR" ]; then
+        log "WARNING: Not removing $INSTALL_DIR because it is not a directory."
+        return 0
+    fi
+
+    remove_known_install_file "$INSTALL_DIR/nasberrypi.py"
+    remove_known_install_file "$INSTALL_DIR/uninstall.sh"
+
+    if "$DRY_RUN"; then
+        log "Would remove $INSTALL_DIR if empty after known Nasberry application files are removed."
+    elif rmdir -- "$INSTALL_DIR" 2>/dev/null; then
+        :
+    else
+        log "WARNING: Preserving $INSTALL_DIR because it contains files not removed by Nasberry."
+    fi
+}
+
 remove_managed_share() {
     [ -f "$SMB_CONF" ] || { log "Samba config not found; skipping managed-share cleanup."; return 0; }
     local marker="# Managed by Nasberry: $SHARE_NAME"
@@ -193,13 +243,9 @@ else
     log "Preserving configuration in $CONFIG_DIR and Samba configuration."
 fi
 
-run_action rm -f -- "$BIN_PATH"
-# Only remove the compatibility path when it is Nasberry's link, so an older
-# installation cannot accidentally remove an unrelated /usr/bin command.
-if [ -L "$SYSTEM_BIN_PATH" ] && [ "$(readlink "$SYSTEM_BIN_PATH")" = "$INSTALL_DIR/nasberrypi.py" ]; then
-    run_action rm -f -- "$SYSTEM_BIN_PATH"
-fi
-run_action rm -rf -- "$INSTALL_DIR"
+remove_command_link "$BIN_PATH"
+remove_command_link "$SYSTEM_BIN_PATH"
+remove_application_files
 
 if "$REMOVE_MOUNT_POINT"; then
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
