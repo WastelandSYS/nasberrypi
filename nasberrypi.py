@@ -38,6 +38,13 @@ DEFAULT_SHARES_FILE = "/etc/nasberry/shares.json" if os.geteuid() == 0 else "~/.
 SHARES_FILE = Path(os.path.expanduser(os.environ.get("NASBERRY_SHARES_FILE", DEFAULT_SHARES_FILE)))
 NASBERRY_SAMBA_BEGIN = "# BEGIN NasberryPi managed shares"
 NASBERRY_SAMBA_END = "# END NasberryPi managed shares"
+LEGACY_SAMBA_SHARE_PREFIX = "# Managed by Nasberry: "
+LEGACY_APPLIANCE_HEADER = "# Managed by Nasberry appliance mode. Previous config is saved before replacement."
+LEGACY_APPLIANCE_MARKER = "# Managed by Nasberry appliance mode"
+LEGACY_APPLIANCE_BEGIN = "# BEGIN Managed by Nasberry appliance mode"
+LEGACY_APPLIANCE_END = "# END Managed by Nasberry appliance mode"
+LEGACY_APPLIANCE_DISABLE_COMMENT = "# Nasberry appliance mode: disable share"
+LEGACY_APPLIANCE_USER_SHARE_LIMIT = "usershare max shares = 0"
 DEFAULTS = {
     "device": "/dev/disk/by-label/NasberryDRV",
     "mount_point": "/mnt/nasberry",
@@ -634,6 +641,10 @@ class ShareConfigError(Exception):
     pass
 
 
+class SambaConfigError(Exception):
+    pass
+
+
 def parse_bool(value, default=False):
     if isinstance(value, bool):
         return value
@@ -916,6 +927,251 @@ def managed_samba_share_names(text=None):
             seen.add(key)
             names.append(name)
     return True, names, "ok"
+
+
+def samba_section_name(line):
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped[1:-1].strip()
+    return None
+
+
+def samba_section_blocks(lines, start=0, end=None):
+    end = len(lines) if end is None else end
+    blocks = []
+    current = None
+    for index in range(start, end):
+        name = samba_section_name(lines[index])
+        if name is not None:
+            if current is not None:
+                current["end"] = index
+                blocks.append(current)
+            current = {"name": name, "start": index, "end": end, "options": {}}
+        elif current is not None and "=" in lines[index]:
+            key, value = lines[index].split("=", 1)
+            current["options"][key.strip().lower()] = value.strip()
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def current_managed_marker_bounds(lines):
+    begins = [index for index, line in enumerate(lines) if line.strip() == NASBERRY_SAMBA_BEGIN]
+    ends = [index for index, line in enumerate(lines) if line.strip() == NASBERRY_SAMBA_END]
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1:
+        raise SambaConfigError("Nasberry managed Samba section markers are malformed")
+    begin, end = begins[0], ends[0]
+    if begin >= end:
+        raise SambaConfigError("Nasberry managed Samba section markers are out of order")
+    return begin, end
+
+
+def legacy_appliance_marker_bounds(lines):
+    begins = [index for index, line in enumerate(lines) if line.strip() == LEGACY_APPLIANCE_BEGIN]
+    ends = [index for index, line in enumerate(lines) if line.strip() == LEGACY_APPLIANCE_END]
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1:
+        raise SambaConfigError("legacy Nasberry appliance markers are malformed")
+    begin, end = begins[0], ends[0]
+    if begin >= end:
+        raise SambaConfigError("legacy Nasberry appliance markers are out of order")
+    return begin, end
+
+
+def legacy_share_marker_name(line):
+    stripped = line.strip()
+    if stripped.startswith(LEGACY_SAMBA_SHARE_PREFIX):
+        return stripped[len(LEGACY_SAMBA_SHARE_PREFIX):].strip()
+    return None
+
+
+def marked_legacy_share_end(lines, marker_index, share_name):
+    index = marker_index + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    section_name = samba_section_name(lines[index]) if index < len(lines) else None
+    if not section_name or section_name.lower() != share_name.lower():
+        return None
+    end = index + 1
+    while end < len(lines) and samba_section_name(lines[end]) is None:
+        end += 1
+    return end
+
+
+def skip_samba_section(lines, index):
+    end = index + 1
+    while end < len(lines) and samba_section_name(lines[end]) is None:
+        end += 1
+    return end
+
+
+def bounds_contain(bounds, index):
+    return bounds is not None and bounds[0] <= index <= bounds[1]
+
+
+def sections_outside_current(lines, current_bounds):
+    return [
+        section
+        for section in samba_section_blocks(lines)
+        if not bounds_contain(current_bounds, section["start"])
+    ]
+
+
+def legacy_appliance_public_bounds(lines, current_bounds):
+    public_sections = [
+        section
+        for section in sections_outside_current(lines, current_bounds)
+        if section["name"].lower() == "public"
+    ]
+    default_sections = [section for section in public_sections if section_is_default_public(section)]
+    if len(public_sections) > 1 or (public_sections and len(default_sections) != 1):
+        raise SambaConfigError("legacy Nasberry appliance Public share is ambiguous")
+    if len(default_sections) == 1:
+        section = default_sections[0]
+        end = section["end"]
+        if current_bounds is not None and section["start"] < current_bounds[0] < end:
+            end = current_bounds[0]
+        return section["start"], end
+    return None
+
+
+def remove_legacy_nasberry_samba_content(text):
+    lines = text.splitlines(keepends=True)
+    current_bounds = current_managed_marker_bounds(lines)
+    legacy_bounds = legacy_appliance_marker_bounds(lines)
+    legacy_appliance_file = any(line.strip() == LEGACY_APPLIANCE_HEADER for line in lines)
+    legacy_public_bounds = legacy_appliance_public_bounds(lines, current_bounds) if legacy_appliance_file else None
+    output = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if legacy_bounds is not None and index == legacy_bounds[0]:
+            index = legacy_bounds[1] + 1
+            continue
+        marker_name = legacy_share_marker_name(lines[index])
+        if marker_name is not None:
+            end = marked_legacy_share_end(lines, index, marker_name)
+            if end is None:
+                detail = marker_name or "<empty>"
+                raise SambaConfigError(f"legacy Nasberry share marker is ambiguous: {detail}")
+            index = end
+            continue
+        if stripped == LEGACY_APPLIANCE_DISABLE_COMMENT:
+            if index + 1 >= len(lines) or lines[index + 1].strip().lower() != "available = no":
+                raise SambaConfigError("legacy Nasberry appliance disable marker is ambiguous")
+            index += 2
+            continue
+        if stripped == LEGACY_APPLIANCE_HEADER:
+            index += 1
+            continue
+        if stripped == LEGACY_APPLIANCE_MARKER:
+            raise SambaConfigError("standalone legacy Nasberry appliance marker is ambiguous")
+        if legacy_appliance_file and stripped.lower() == LEGACY_APPLIANCE_USER_SHARE_LIMIT:
+            index += 1
+            continue
+        if legacy_public_bounds is not None and index == legacy_public_bounds[0]:
+            index = legacy_public_bounds[1]
+            continue
+        output.append(lines[index])
+        index += 1
+    return "".join(output)
+
+
+def section_is_default_public(section):
+    if section["name"].lower() != "public":
+        return False
+    path = section["options"].get("path", "")
+    if os.path.abspath(path) != os.path.abspath(public_share_path()):
+        return False
+    read_only = section["options"].get("read only", "no").lower() in {"yes", "true"}
+    return not read_only
+
+
+def sections_contain_only_default_public(sections, allow_homes=False):
+    exported = [section for section in sections if section["name"].lower() not in {"global"}]
+    if allow_homes:
+        exported = [section for section in exported if section["name"].lower() != "homes"]
+    return len(exported) == 1 and section_is_default_public(exported[0])
+
+
+def sections_contain_no_or_only_default_public(sections, allow_homes=False):
+    exported = [section for section in sections if section["name"].lower() not in {"global"}]
+    if allow_homes:
+        exported = [section for section in exported if section["name"].lower() != "homes"]
+    return not exported or (len(exported) == 1 and section_is_default_public(exported[0]))
+
+
+def legacy_owned_exports_are_default_public(lines, current_bounds, legacy_bounds):
+    for index, line in enumerate(lines):
+        if bounds_contain(current_bounds, index) or bounds_contain(legacy_bounds, index):
+            continue
+        marker_name = legacy_share_marker_name(line)
+        if marker_name is None:
+            continue
+        end = marked_legacy_share_end(lines, index, marker_name)
+        if end is None:
+            return False, "legacy share marker is ambiguous"
+        sections = samba_section_blocks(lines, index + 1, end)
+        if not sections_contain_only_default_public(sections):
+            return False, "legacy marked share is not the default Public share"
+    if legacy_bounds is not None:
+        begin, end = legacy_bounds
+        sections = samba_section_blocks(lines, begin + 1, end)
+        if not sections_contain_no_or_only_default_public(sections, allow_homes=True):
+            return False, "legacy appliance block contains non-default shares"
+    return True, "ok"
+
+
+def legacy_default_public_share_evidence(text):
+    lines = text.splitlines(keepends=True)
+    try:
+        remove_legacy_nasberry_samba_content(text)
+        current_bounds = current_managed_marker_bounds(lines)
+        legacy_bounds = legacy_appliance_marker_bounds(lines)
+    except SambaConfigError as exc:
+        return False, str(exc)
+    owned_ok, owned_reason = legacy_owned_exports_are_default_public(lines, current_bounds, legacy_bounds)
+    if not owned_ok:
+        return False, owned_reason
+    if current_bounds is not None:
+        begin, end = current_bounds
+        current_sections = samba_section_blocks(lines, begin + 1, end)
+        if sections_contain_only_default_public(current_sections):
+            return True, "current managed Public share"
+        return False, "current managed section is not the default Public share"
+    for index, line in enumerate(lines):
+        marker_name = legacy_share_marker_name(line)
+        if marker_name is None:
+            continue
+        if marker_name.lower() != "public":
+            continue
+        end = marked_legacy_share_end(lines, index, marker_name)
+        if end is None:
+            return False, "legacy share marker is ambiguous"
+        sections = samba_section_blocks(lines, index + 1, end)
+        if sections_contain_only_default_public(sections):
+            return True, "legacy marked Public share"
+        return False, "legacy marked Public share does not match the configured default"
+    if any(line.strip() == LEGACY_APPLIANCE_MARKER for line in lines):
+        return False, "standalone legacy Nasberry appliance marker is ambiguous"
+    legacy_appliance_file = any(line.strip() == LEGACY_APPLIANCE_HEADER for line in lines)
+    if legacy_appliance_file:
+        sections = [section for section in samba_section_blocks(lines) if section_is_default_public(section)]
+        if len(sections) == 1:
+            return True, "legacy appliance Public share"
+        if len(sections) > 1:
+            return False, "legacy appliance Public share is ambiguous"
+        return False, "legacy appliance Samba configuration is not the default Public share"
+    if legacy_bounds is not None:
+        index, end = legacy_bounds
+        sections = samba_section_blocks(lines, index + 1, end)
+        if sections_contain_only_default_public(sections, allow_homes=True):
+            return True, "legacy appliance Public share"
+        return False, "legacy appliance block is not the default Public share"
+    return False, "no known legacy Nasberry default Public share was found"
 
 
 def samba_config_valid():
@@ -1349,6 +1605,8 @@ def manage_shares():
     if os.geteuid() != 0:
         log("✖ Shared folder management must run as root: sudo nasberry shares")
         return False
+    if not migrate_missing_legacy_shares_file():
+        return False
     try:
         shares = load_shares()
     except ShareConfigError as exc:
@@ -1439,6 +1697,30 @@ def share_config_preflight():
     except ShareConfigError as exc:
         log(f"✖ Share configuration error: {exc}")
         return False
+
+
+def migrate_missing_legacy_shares_file():
+    if os.path.lexists(SHARES_FILE):
+        return True
+    smb_file = Path("/etc/samba/smb.conf")
+    try:
+        text = smb_file.read_text()
+    except OSError as exc:
+        log(f"✖ Could not inspect Samba configuration for legacy share migration: {exc}")
+        return False
+    ok, reason = legacy_default_public_share_evidence(text)
+    if not ok:
+        log("✖ Could not safely reconstruct the missing share configuration.")
+        log(f"  Reason: {reason}")
+        log(f"Restore {SHARES_FILE} from backup or run 'sudo nasberry setup'.")
+        return False
+    try:
+        save_shares([default_share()])
+    except OSError as exc:
+        log(f"✖ Could not migrate legacy share configuration to {SHARES_FILE}: {exc}")
+        return False
+    log(f"✔ Migrated legacy Nasberry share configuration to {SHARES_FILE}")
+    return True
 
 
 def setup_share_config_preflight():
@@ -1575,6 +1857,8 @@ def repair_samba_share():
         return False
     if not share_user_preflight(SHARE_USER):
         return False
+    if not migrate_missing_legacy_shares_file():
+        return False
     if not share_config_preflight():
         return False
     if not samba_config_preflight():
@@ -1615,12 +1899,18 @@ def appliance_samba_config():
 
 
 def replace_managed_samba_section(text, section):
-    start = text.find(NASBERRY_SAMBA_BEGIN)
-    end = text.find(NASBERRY_SAMBA_END)
-    if start != -1 and end != -1 and end > start:
-        end += len(NASBERRY_SAMBA_END)
-        return text[:start].rstrip() + "\n\n" + section.rstrip() + "\n" + text[end:].lstrip()
-    return text.rstrip() + "\n\n" + section
+    cleaned = remove_legacy_nasberry_samba_content(text)
+    lines = cleaned.splitlines(keepends=True)
+    bounds = current_managed_marker_bounds(lines)
+    if bounds is not None:
+        begin, end = bounds
+        before = "".join(lines[:begin]).rstrip()
+        after = "".join(lines[end + 1:]).lstrip()
+    else:
+        before = cleaned.rstrip()
+        after = ""
+    parts = [part for part in (before, section.rstrip(), after) if part]
+    return "\n\n".join(parts) + "\n"
 
 
 def configure_samba_share():
@@ -1637,6 +1927,14 @@ def configure_samba_share():
         return False
     if not samba_config_preflight():
         return False
+    try:
+        updated_samba_config = replace_managed_samba_section(smb_file.read_text(), managed_section)
+    except SambaConfigError as exc:
+        log(f"✖ Samba configuration cannot be updated safely: {exc}")
+        return False
+    except OSError as exc:
+        log(f"✖ Could not read Samba configuration {smb_file}: {exc}")
+        return False
     log("Updating the NasberryPi managed Samba section only.")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = smb_file.with_name(f"{smb_file.name}.nasberry.{timestamp}.bak")
@@ -1651,7 +1949,7 @@ def configure_samba_share():
         descriptor, candidate_name = tempfile.mkstemp(prefix=f".{smb_file.name}.nasberry.", dir=smb_file.parent)
         candidate = Path(candidate_name)
         with os.fdopen(descriptor, "w") as handle:
-            handle.write(replace_managed_samba_section(smb_file.read_text(), managed_section))
+            handle.write(updated_samba_config)
             handle.flush()
             os.fsync(handle.fileno())
         shutil.copymode(smb_file, candidate)

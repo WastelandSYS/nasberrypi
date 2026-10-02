@@ -97,6 +97,42 @@ class NasberryTests(unittest.TestCase):
             "Space        10.0G free / 20.0G",
         ]
 
+    def legacy_v026_samba_config(self, public_path="/mnt/nasberry/Public", extra=""):
+        return f"""# Managed by Nasberry appliance mode. Previous config is saved before replacement.
+[global]
+   workgroup = WORKGROUP
+   server role = standalone server
+   security = user
+   map to guest = never
+   usershare max shares = 0
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+
+[Public]
+   path = {public_path}
+   browseable = yes
+   available = yes
+   read only = no
+   guest ok = no
+   valid users = kali
+   force user = kali
+   follow symlinks = no
+   wide links = no
+   create mask = 0664
+   directory mask = 0775
+{extra}"""
+
+    def current_public_section(self):
+        return f"""{nasberrypi.NASBERRY_SAMBA_BEGIN}
+# Managed by NasberryPi. Edit with 'sudo nasberry shares'.
+[Public]
+   path = /mnt/nasberry/Public
+   read only = no
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+
     def test_load_config_ignores_malformed_file_and_preserves_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.ini"
@@ -318,6 +354,214 @@ class NasberryTests(unittest.TestCase):
         ok, _names, reason = nasberrypi.managed_samba_share_names(text)
         self.assertFalse(ok)
         self.assertIn("duplicate", reason)
+
+    def test_replace_managed_samba_section_migrates_v026_appliance_config(self):
+        legacy = self.legacy_v026_samba_config(extra="""
+[MediaArchive]
+   path = /srv/media
+""")
+        updated = nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_HEADER, updated)
+        self.assertNotIn("usershare max shares = 0", updated)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_END), 1)
+        self.assertEqual(updated.count("[Public]"), 1)
+        self.assertIn("[MediaArchive]", updated)
+        self.assertIn("path = /srv/media", updated)
+        self.assertIn("server role = standalone server", updated)
+
+    def test_replace_managed_samba_section_migrates_legacy_marked_public(self):
+        legacy = """[global]
+   workgroup = WORKGROUP
+
+# Managed by Nasberry: Public
+[Public]
+   path = /mnt/nasberry/Public
+   read only = no
+
+[OtherShare]
+   path = /srv/other
+"""
+        updated = nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+        self.assertNotIn("# Managed by Nasberry: Public", updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertIn("[OtherShare]", updated)
+
+    def test_replace_managed_samba_section_migrates_legacy_marked_non_public(self):
+        legacy = """[global]
+   workgroup = WORKGROUP
+
+# Managed by Nasberry: Media
+[Media]
+   path = /mnt/nasberry/Media
+   read only = no
+
+[OtherShare]
+   path = /srv/other
+"""
+        updated = nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+        self.assertNotIn("# Managed by Nasberry: Media", updated)
+        self.assertNotIn("[Media]", updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+        self.assertIn("[OtherShare]", updated)
+
+    def test_replace_managed_samba_section_migrates_bounded_legacy_block(self):
+        legacy = f"""[global]
+   workgroup = WORKGROUP
+
+{nasberrypi.LEGACY_APPLIANCE_BEGIN}
+[Public]
+   path = /mnt/nasberry/Public
+{nasberrypi.LEGACY_APPLIANCE_END}
+
+[OtherShare]
+   path = /srv/other
+"""
+        updated = nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_BEGIN, updated)
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_END, updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+        self.assertIn("[OtherShare]", updated)
+
+    def test_replace_managed_samba_section_replaces_current_block_without_duplication(self):
+        existing = f"""[global]
+   workgroup = WORKGROUP
+
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Old]
+   path = /mnt/nasberry/Old
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+        updated = nasberrypi.replace_managed_samba_section(existing, self.current_public_section())
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_END), 1)
+        self.assertNotIn("[Old]", updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+
+    def test_replace_managed_samba_section_removes_mixed_current_and_legacy(self):
+        mixed = self.legacy_v026_samba_config(extra=f"""
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Public]
+   path = /mnt/nasberry/Public
+{nasberrypi.NASBERRY_SAMBA_END}
+""")
+        updated = nasberrypi.replace_managed_samba_section(mixed, self.current_public_section())
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_HEADER, updated)
+        self.assertNotIn("usershare max shares = 0", updated)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_END), 1)
+        self.assertEqual(updated.count("[Public]"), 1)
+
+    def test_replace_managed_samba_section_rejects_ambiguous_v026_public(self):
+        legacy = self.legacy_v026_samba_config(public_path="/srv/Public")
+        with self.assertRaises(nasberrypi.SambaConfigError):
+            nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+
+    def test_replace_managed_samba_section_preserves_unowned_usershare_setting(self):
+        existing = """[global]
+   workgroup = CUSTOM
+   server string = My NAS
+   usershare max shares = 0
+   min protocol = SMB2
+
+[OtherShare]
+   path = /srv/other
+"""
+        updated = nasberrypi.replace_managed_samba_section(existing, self.current_public_section())
+        self.assertIn("workgroup = CUSTOM", updated)
+        self.assertIn("server string = My NAS", updated)
+        self.assertIn("usershare max shares = 0", updated)
+        self.assertIn("min protocol = SMB2", updated)
+        self.assertIn("[OtherShare]", updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+
+    def test_replace_managed_samba_section_preserves_unowned_usershare_setting_with_current_block(self):
+        existing = f"""[global]
+   workgroup = CUSTOM
+   usershare max shares = 0
+
+{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Old]
+   path = /mnt/nasberry/Old
+{nasberrypi.NASBERRY_SAMBA_END}
+"""
+        updated = nasberrypi.replace_managed_samba_section(existing, self.current_public_section())
+        self.assertIn("usershare max shares = 0", updated)
+        self.assertNotIn("[Old]", updated)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertEqual(updated.count("[Public]"), 1)
+
+    def test_replace_managed_samba_section_rejects_malformed_legacy_appliance_markers(self):
+        cases = (
+            f"{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n[Public]\n   path = /mnt/nasberry/Public\n",
+            f"[Public]\n   path = /mnt/nasberry/Public\n{nasberrypi.LEGACY_APPLIANCE_END}\n",
+            f"{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n{nasberrypi.LEGACY_APPLIANCE_END}\n",
+            f"{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n{nasberrypi.LEGACY_APPLIANCE_END}\n{nasberrypi.LEGACY_APPLIANCE_END}\n",
+            f"{nasberrypi.LEGACY_APPLIANCE_END}\n{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n",
+        )
+        for text in cases:
+            with self.subTest(text=text), self.assertRaises(nasberrypi.SambaConfigError):
+                nasberrypi.replace_managed_samba_section(text, self.current_public_section())
+
+    def test_replace_managed_samba_section_rejects_ambiguous_legacy_share_markers(self):
+        cases = (
+            "# Managed by Nasberry: Public\n# unexpected\n[Public]\n   path = /mnt/nasberry/Public\n",
+            "# Managed by Nasberry: Public\n[Media]\n   path = /mnt/nasberry/Media\n",
+            "# Managed by Nasberry: Public\n",
+        )
+        for text in cases:
+            with self.subTest(text=text), self.assertRaises(nasberrypi.SambaConfigError):
+                nasberrypi.replace_managed_samba_section(text, self.current_public_section())
+
+    def test_replace_managed_samba_section_rejects_standalone_weak_appliance_marker(self):
+        legacy = f"""{nasberrypi.LEGACY_APPLIANCE_MARKER}
+[Public]
+   path = /mnt/nasberry/Public
+"""
+        with self.assertRaises(nasberrypi.SambaConfigError):
+            nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+
+    def test_replace_managed_samba_section_rejects_malformed_disable_comment(self):
+        legacy = f"""[global]
+   workgroup = WORKGROUP
+
+{nasberrypi.LEGACY_APPLIANCE_DISABLE_COMMENT}
+   usershare max shares = 0
+
+[OtherShare]
+   path = /srv/other
+"""
+        with self.assertRaises(nasberrypi.SambaConfigError):
+            nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+
+    def test_replace_managed_samba_section_removes_valid_legacy_disable_directive(self):
+        legacy = f"""[global]
+   workgroup = WORKGROUP
+
+{nasberrypi.LEGACY_APPLIANCE_DISABLE_COMMENT}
+   available = no
+
+[OtherShare]
+   path = /srv/other
+"""
+        updated = nasberrypi.replace_managed_samba_section(legacy, self.current_public_section())
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_DISABLE_COMMENT, updated)
+        self.assertNotIn("available = no", updated)
+        self.assertIn("[OtherShare]", updated)
+        self.assertEqual(updated.count("[Public]"), 1)
+
+    def test_replace_managed_samba_section_rejects_malformed_current_markers(self):
+        cases = (
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n[Public]\n",
+            f"[Public]\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n{nasberrypi.NASBERRY_SAMBA_END}\n{nasberrypi.NASBERRY_SAMBA_END}\n",
+            f"{nasberrypi.NASBERRY_SAMBA_END}\n{nasberrypi.NASBERRY_SAMBA_BEGIN}\n",
+        )
+        for text in cases:
+            with self.subTest(text=text), self.assertRaises(nasberrypi.SambaConfigError):
+                nasberrypi.replace_managed_samba_section(text, self.current_public_section())
 
     @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
     @mock.patch.object(nasberrypi, "managed_samba_share_names", return_value=(True, ["Public"], "ok"))
@@ -843,6 +1087,222 @@ class NasberryTests(unittest.TestCase):
                 shares_file.write_text('{"shares": [{"name": "Media", "path": "Media", "enabled": false}]}')
                 self.assertTrue(nasberrypi.share_config_preflight())
 
+    def test_migrate_missing_legacy_shares_from_v026_appliance_public(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config())
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch("builtins.print") as output:
+                self.assertTrue(nasberrypi.migrate_missing_legacy_shares_file())
+            migrated = json.loads(shares_file.read_text())
+            self.assertEqual(migrated, {"shares": [nasberrypi.default_share()]})
+            self.assertEqual(shares_file.stat().st_mode & 0o777, 0o600)
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Migrated legacy Nasberry share configuration", rendered)
+
+    def test_migrate_missing_legacy_shares_from_current_public_fallback_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.current_public_section())
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.migrate_missing_legacy_shares_file())
+            self.assertEqual(json.loads(shares_file.read_text()), {"shares": [nasberrypi.default_share()]})
+
+    def test_migrate_missing_legacy_shares_refuses_current_public_with_ambiguous_legacy_remnants(self):
+        cases = (
+            self.current_public_section() + """
+# Managed by Nasberry: Public
+# unexpected
+[Public]
+   path = /mnt/nasberry/Public
+""",
+            self.current_public_section() + f"""
+{nasberrypi.LEGACY_APPLIANCE_MARKER}
+""",
+            self.current_public_section() + f"""
+{nasberrypi.LEGACY_APPLIANCE_DISABLE_COMMENT}
+   usershare max shares = 0
+""",
+            self.current_public_section() + f"""
+{nasberrypi.LEGACY_APPLIANCE_BEGIN}
+[Public]
+   path = /mnt/nasberry/Public
+""",
+        )
+        for text in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                shares_file = Path(directory) / "shares.json"
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(text)
+                with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                     mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch.object(nasberrypi, "save_shares") as save_shares, \
+                     mock.patch("builtins.print") as output:
+                    self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+                self.assertFalse(shares_file.exists())
+                save_shares.assert_not_called()
+                rendered = "\n".join(call.args[0] for call in output.call_args_list)
+                self.assertIn("Could not safely reconstruct", rendered)
+
+    def test_migrate_missing_legacy_shares_refuses_current_public_with_custom_legacy_owned_shares(self):
+        cases = (
+            self.current_public_section() + """
+# Managed by Nasberry: Media
+[Media]
+   path = /mnt/nasberry/Media
+   read only = no
+""",
+            self.current_public_section() + """
+# Managed by Nasberry: Public
+[Public]
+   path = /srv/old-public
+   read only = no
+""",
+            self.current_public_section() + f"""
+{nasberrypi.LEGACY_APPLIANCE_BEGIN}
+[Media]
+   path = /mnt/nasberry/Media
+{nasberrypi.LEGACY_APPLIANCE_END}
+""",
+        )
+        for text in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                shares_file = Path(directory) / "shares.json"
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(text)
+                with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                     mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch.object(nasberrypi, "save_shares") as save_shares, \
+                     mock.patch("builtins.print") as output:
+                    self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+                self.assertFalse(shares_file.exists())
+                save_shares.assert_not_called()
+                rendered = "\n".join(call.args[0] for call in output.call_args_list)
+                self.assertIn("Could not safely reconstruct", rendered)
+
+    def test_migrate_missing_legacy_shares_allows_current_public_with_duplicate_default_public_evidence(self):
+        cases = (
+            self.current_public_section() + """
+# Managed by Nasberry: Public
+[Public]
+   path = /mnt/nasberry/Public
+   read only = no
+""",
+            self.current_public_section() + f"""
+{nasberrypi.LEGACY_APPLIANCE_BEGIN}
+[Public]
+   path = /mnt/nasberry/Public
+   read only = no
+{nasberrypi.LEGACY_APPLIANCE_END}
+""",
+        )
+        for text in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                shares_file = Path(directory) / "shares.json"
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(text)
+                with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                     mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch("builtins.print"):
+                    self.assertTrue(nasberrypi.migrate_missing_legacy_shares_file())
+                self.assertEqual(json.loads(shares_file.read_text()), {"shares": [nasberrypi.default_share()]})
+
+    def test_migrate_missing_legacy_shares_refuses_without_ownership_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text("[Public]\n   path = /mnt/nasberry/Public\n")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+            self.assertFalse(shares_file.exists())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Could not safely reconstruct", rendered)
+
+    def test_migrate_missing_legacy_shares_refuses_custom_or_multiple_current_shares(self):
+        cases = (
+            f"""{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Public]
+   path = /mnt/nasberry/Public
+[Media]
+   path = /mnt/nasberry/Media
+{nasberrypi.NASBERRY_SAMBA_END}
+""",
+            f"""{nasberrypi.NASBERRY_SAMBA_BEGIN}
+[Media]
+   path = /mnt/nasberry/Media
+{nasberrypi.NASBERRY_SAMBA_END}
+""",
+        )
+        for text in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                shares_file = Path(directory) / "shares.json"
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(text)
+                with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                     mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch("builtins.print"):
+                    self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+                self.assertFalse(shares_file.exists())
+
+    def test_migrate_missing_legacy_shares_refuses_wrong_public_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config(public_path="/srv/Public"))
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch("builtins.print"):
+                    self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+            self.assertFalse(shares_file.exists())
+
+    def test_migrate_missing_legacy_shares_refuses_ambiguous_legacy_evidence(self):
+        cases = (
+            f"{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n[Public]\n   path = /mnt/nasberry/Public\n",
+            "# Managed by Nasberry: Public\n# unexpected\n[Public]\n   path = /mnt/nasberry/Public\n",
+            f"{nasberrypi.LEGACY_APPLIANCE_MARKER}\n[Public]\n   path = /mnt/nasberry/Public\n",
+        )
+        for text in cases:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                shares_file = Path(directory) / "shares.json"
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(text)
+                with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                     mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch.object(nasberrypi, "save_shares") as save_shares, \
+                     mock.patch("builtins.print") as output:
+                    self.assertFalse(nasberrypi.migrate_missing_legacy_shares_file())
+                self.assertFalse(shares_file.exists())
+                save_shares.assert_not_called()
+                rendered = "\n".join(call.args[0] for call in output.call_args_list)
+                self.assertIn("Could not safely reconstruct", rendered)
+
+    def test_migrate_missing_legacy_shares_preserves_existing_problematic_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.write_text("{broken")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "save_shares") as save_shares:
+                self.assertTrue(nasberrypi.migrate_missing_legacy_shares_file())
+            self.assertEqual(shares_file.read_text(), "{broken")
+        save_shares.assert_not_called()
+
+    def test_migrate_missing_legacy_shares_preserves_dangling_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            shares_file.symlink_to(Path(directory) / "missing")
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "save_shares") as save_shares:
+                self.assertTrue(nasberrypi.migrate_missing_legacy_shares_file())
+            self.assertTrue(shares_file.is_symlink())
+        save_shares.assert_not_called()
+
     @mock.patch.object(nasberrypi, "mount_storage")
     @mock.patch.object(nasberrypi, "is_mounted", return_value=True)
     @mock.patch.object(nasberrypi, "device_mounted_at_nas", return_value=False)
@@ -886,6 +1346,38 @@ class NasberryTests(unittest.TestCase):
         mount_storage.assert_not_called()
         ensure_public.assert_not_called()
         run.assert_not_called()
+
+    def test_read_only_and_start_paths_do_not_migrate_missing_shares(self):
+        with mock.patch.object(nasberrypi, "enabled_shares", side_effect=nasberrypi.ShareConfigError("missing shares")), \
+             mock.patch.object(nasberrypi, "save_shares") as save_shares, \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=None), \
+             mock.patch.object(nasberrypi, "storage_mount_state_label", return_value="safely unmounted"), \
+             mock.patch.object(nasberrypi, "disk_usage", return_value="Not mounted"), \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.start_share())
+            nasberrypi.status()
+        save_shares.assert_not_called()
+
+    def test_doctor_does_not_migrate_missing_shares(self):
+        with mock.patch.object(nasberrypi, "section_header"), \
+             mock.patch.object(nasberrypi, "configuration_check", return_value=(True, "ok", "")), \
+             mock.patch.object(nasberrypi.os, "geteuid", return_value=0), \
+             mock.patch.object(nasberrypi, "command_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "device_exists", return_value=True), \
+             mock.patch.object(nasberrypi.os.path, "isdir", return_value=True), \
+             mock.patch.object(nasberrypi, "storage_mount_state", return_value="safely_unmounted"), \
+             mock.patch.object(nasberrypi, "active_mount_point", return_value=None), \
+             mock.patch.object(nasberrypi, "load_shares", side_effect=nasberrypi.ShareConfigError("missing shares")), \
+             mock.patch.object(nasberrypi, "protected_folder_status", return_value=(True, "ok")), \
+             mock.patch.object(nasberrypi, "service_exists", return_value=True), \
+             mock.patch.object(nasberrypi, "samba_config_valid", return_value=(False, "missing shares")), \
+             mock.patch.object(nasberrypi, "samba_account_valid", return_value=(True, "ok")), \
+             mock.patch.object(nasberrypi, "print_connection_info"), \
+             mock.patch.object(nasberrypi, "save_shares") as save_shares, \
+             mock.patch("builtins.print"):
+            self.assertFalse(nasberrypi.doctor())
+        save_shares.assert_not_called()
 
     def test_mount_storage_refuses_unresolved_mount_ownership_before_side_effects(self):
         with mock.patch.object(nasberrypi, "SHARE_USER", "deleteduser"), \
@@ -1272,6 +1764,103 @@ class NasberryTests(unittest.TestCase):
             self.assertEqual(smb_file.read_text(), "original config")
         rendered = "\n".join(call.args[0] for call in output.call_args_list)
         self.assertIn("Samba config validation failed: candidate invalid", rendered)
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "samba_config_valid", return_value=(True, "ready"))
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_migrates_legacy_appliance_through_candidate(self, run, _load_shares, _valid, _preflight):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = ""
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config(extra="""
+[MediaArchive]
+   path = /srv/media
+"""))
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
+                self.assertTrue(nasberrypi.configure_samba_share())
+            updated = smb_file.read_text()
+            backups = list(Path(directory).glob("smb.conf.nasberry.*.bak"))
+            self.assertEqual(len(backups), 1)
+        self.assertNotIn(nasberrypi.LEGACY_APPLIANCE_HEADER, updated)
+        self.assertNotIn("usershare max shares = 0", updated)
+        self.assertEqual(updated.count(nasberrypi.NASBERRY_SAMBA_BEGIN), 1)
+        self.assertEqual(updated.count("[Public]"), 1)
+        self.assertIn("[MediaArchive]", updated)
+        run.assert_called_once()
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_malformed_current_markers_leave_live_config(self, run, _load_shares, _preflight):
+        run.return_value.returncode = 0
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            original = f"{nasberrypi.NASBERRY_SAMBA_BEGIN}\n[Public]\n"
+            smb_file.write_text(original)
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi.shutil, "copy2") as copy2, \
+                 mock.patch.object(nasberrypi.tempfile, "mkstemp") as mkstemp, \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.configure_samba_share())
+            self.assertEqual(smb_file.read_text(), original)
+        copy2.assert_not_called()
+        mkstemp.assert_not_called()
+        run.assert_not_called()
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("cannot be updated safely", rendered)
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_ambiguous_legacy_layout_fails_before_backup(self, run, _load_shares, _preflight):
+        run.return_value.returncode = 0
+        cases = (
+            f"{nasberrypi.LEGACY_APPLIANCE_BEGIN}\n[Public]\n   path = /mnt/nasberry/Public\n",
+            "# Managed by Nasberry: Public\n# unexpected\n[Public]\n   path = /mnt/nasberry/Public\n",
+            f"{nasberrypi.LEGACY_APPLIANCE_MARKER}\n[Public]\n   path = /mnt/nasberry/Public\n",
+        )
+        for original in cases:
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                smb_file = Path(directory) / "smb.conf"
+                smb_file.write_text(original)
+                with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                     mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                     mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                     mock.patch.object(nasberrypi.shutil, "copy2") as copy2, \
+                     mock.patch.object(nasberrypi.tempfile, "mkstemp") as mkstemp, \
+                     mock.patch("builtins.print") as output:
+                    self.assertFalse(nasberrypi.configure_samba_share())
+                self.assertEqual(smb_file.read_text(), original)
+                copy2.assert_not_called()
+                mkstemp.assert_not_called()
+                rendered = "\n".join(call.args[0] for call in output.call_args_list)
+                self.assertIn("cannot be updated safely", rendered)
+        run.assert_not_called()
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_testparm_rejection_keeps_legacy_live_config(self, run, _load_shares, _preflight):
+        run.return_value.returncode = 1
+        run.return_value.stderr = "candidate invalid"
+        run.return_value.stdout = ""
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            original = self.legacy_v026_samba_config()
+            smb_file.write_text(original)
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
+                self.assertFalse(nasberrypi.configure_samba_share())
+            self.assertEqual(smb_file.read_text(), original)
+            self.assertEqual(len(list(Path(directory).glob("smb.conf.nasberry.*.bak"))), 1)
 
     @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "appliance_samba_config", return_value="managed")
@@ -2528,13 +3117,15 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi, "load_shares", side_effect=nasberrypi.ShareConfigError("invalid shares"))
     @mock.patch.object(nasberrypi, "save_shares")
     def test_manage_shares_refuses_broken_config_without_saving(self, save_shares, _load_shares, _geteuid):
-        with mock.patch("builtins.print"):
+        with mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
+             mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.manage_shares())
         save_shares.assert_not_called()
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_manage_shares_create_save_failure_returns_false(self, _geteuid):
-        with mock.patch.object(nasberrypi, "load_shares", return_value=[]), \
+        with mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
+             mock.patch.object(nasberrypi, "load_shares", return_value=[]), \
              mock.patch.object(nasberrypi, "save_shares", side_effect=OSError("disk full")), \
              mock.patch("builtins.input", side_effect=["1", "Media", "Media"]), \
              mock.patch("builtins.print") as output:
@@ -2545,9 +3136,23 @@ class NasberryTests(unittest.TestCase):
         self.assertNotIn("Added share", rendered)
 
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_manage_shares_migrates_legacy_missing_shares_before_loading(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config())
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch("builtins.input", return_value="q"), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.manage_shares())
+            self.assertEqual(json.loads(shares_file.read_text()), {"shares": [nasberrypi.default_share()]})
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_manage_shares_toggle_save_failure_returns_false(self, _geteuid):
         shares = [{"name": "Media", "path": "/mnt/nasberry/Media", "enabled": True, "read_only": False}]
-        with mock.patch.object(nasberrypi, "load_shares", return_value=shares), \
+        with mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
+             mock.patch.object(nasberrypi, "load_shares", return_value=shares), \
              mock.patch.object(nasberrypi, "save_shares", side_effect=OSError("denied")), \
              mock.patch("builtins.input", side_effect=["2", "Media"]), \
              mock.patch("builtins.print") as output:
@@ -2569,7 +3174,8 @@ class NasberryTests(unittest.TestCase):
     @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
     def test_manage_shares_removing_final_share_saves_empty_list(self, _geteuid):
         shares = [{"name": "Only", "path": "/mnt/nasberry/Only", "enabled": True, "read_only": False}]
-        with mock.patch.object(nasberrypi, "load_shares", return_value=shares), \
+        with mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
+             mock.patch.object(nasberrypi, "load_shares", return_value=shares), \
              mock.patch.object(nasberrypi, "save_shares") as save_shares, \
              mock.patch("builtins.input", side_effect=["4", "Only", "y", "q"]), \
              mock.patch("builtins.print"):
@@ -2721,6 +3327,7 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch("builtins.print") as output:
             self.assertFalse(nasberrypi.repair_samba_share())
         rendered = "\n".join(call.args[0] for call in output.call_args_list)
@@ -2745,6 +3352,7 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
         samba_preflight.assert_not_called()
@@ -2767,8 +3375,132 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_migrates_legacy_missing_shares_before_storage(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config())
+            with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "mount_storage", return_value=True) as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout", return_value=True), \
+                 mock.patch.object(nasberrypi, "ensure_share_folders", return_value=True), \
+                 mock.patch.object(nasberrypi, "configure_samba_share", return_value=True), \
+                 mock.patch.object(nasberrypi, "restart_samba_service", return_value=True), \
+                 mock.patch("builtins.print"):
+                self.assertTrue(nasberrypi.repair_samba_share())
+            self.assertEqual(json.loads(shares_file.read_text()), {"shares": [nasberrypi.default_share()]})
+        mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=True)
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_migration_save_failure_blocks_storage_and_samba(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.legacy_v026_samba_config())
+            with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "save_shares", side_effect=OSError("disk full")), \
+                 mock.patch.object(nasberrypi, "share_config_preflight") as share_preflight, \
+                 mock.patch.object(nasberrypi, "samba_config_preflight") as samba_preflight, \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_shares, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure, \
+                 mock.patch.object(nasberrypi, "restart_samba_service") as restart, \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.repair_samba_share())
+            self.assertFalse(shares_file.exists())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Could not migrate legacy share configuration", rendered)
+        self.assertIn("disk full", rendered)
+        share_preflight.assert_not_called()
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_ambiguous_legacy_evidence_blocks_storage_and_samba(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.current_public_section() + """
+# Managed by Nasberry: Public
+# unexpected
+[Public]
+   path = /mnt/nasberry/Public
+""")
+            with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "share_config_preflight") as share_preflight, \
+                 mock.patch.object(nasberrypi, "samba_config_preflight") as samba_preflight, \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_shares, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure, \
+                 mock.patch.object(nasberrypi, "restart_samba_service") as restart, \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.repair_samba_share())
+            self.assertFalse(shares_file.exists())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Could not safely reconstruct", rendered)
+        share_preflight.assert_not_called()
+        samba_preflight.assert_not_called()
+        mount_storage.assert_not_called()
+        ensure_layout.assert_not_called()
+        ensure_shares.assert_not_called()
+        configure.assert_not_called()
+        restart.assert_not_called()
+
+    @mock.patch.object(nasberrypi.os, "geteuid", return_value=0)
+    def test_repair_samba_custom_legacy_share_evidence_blocks_storage_and_samba(self, _geteuid):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text(self.current_public_section() + """
+# Managed by Nasberry: Media
+[Media]
+   path = /mnt/nasberry/Media
+   read only = no
+""")
+            with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(nasberrypi, "share_config_preflight") as share_preflight, \
+                 mock.patch.object(nasberrypi, "samba_config_preflight") as samba_preflight, \
+                 mock.patch.object(nasberrypi, "mount_storage") as mount_storage, \
+                 mock.patch.object(nasberrypi, "ensure_storage_layout") as ensure_layout, \
+                 mock.patch.object(nasberrypi, "ensure_share_folders") as ensure_shares, \
+                 mock.patch.object(nasberrypi, "configure_samba_share") as configure, \
+                 mock.patch.object(nasberrypi, "restart_samba_service") as restart, \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.repair_samba_share())
+            self.assertFalse(shares_file.exists())
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("legacy marked share is not the default Public share", rendered)
+        share_preflight.assert_not_called()
         samba_preflight.assert_not_called()
         mount_storage.assert_not_called()
         ensure_layout.assert_not_called()
@@ -2808,6 +3540,7 @@ class NasberryTests(unittest.TestCase):
 
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", side_effect=step("user_preflight")) as user_preflight, \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", side_effect=step("migrate_shares")) as migrate_shares, \
              mock.patch.object(nasberrypi, "share_config_preflight", side_effect=step("share_preflight")) as share_preflight, \
              mock.patch.object(nasberrypi, "samba_config_preflight", side_effect=step("samba_preflight")) as samba_preflight, \
              mock.patch.object(nasberrypi, "mount_storage", side_effect=step("mount")) as mount_storage, \
@@ -2816,8 +3549,9 @@ class NasberryTests(unittest.TestCase):
              mock.patch.object(nasberrypi, "configure_samba_share", side_effect=step("configure")) as configure, \
              mock.patch.object(nasberrypi, "restart_samba_service", side_effect=step("restart")) as restart:
             self.assertTrue(nasberrypi.repair_samba_share())
-        self.assertEqual(calls, ["user_preflight", "share_preflight", "samba_preflight", "mount", "layout", "folders", "configure", "restart"])
+        self.assertEqual(calls, ["user_preflight", "migrate_shares", "share_preflight", "samba_preflight", "mount", "layout", "folders", "configure", "restart"])
         user_preflight.assert_called_once_with("kali")
+        migrate_shares.assert_called_once_with()
         share_preflight.assert_called_once_with()
         samba_preflight.assert_called_once_with()
         mount_storage.assert_called_once_with(repair_permissions=True, confirm_external_move=True)
@@ -2839,6 +3573,7 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
              mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
@@ -2858,6 +3593,7 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
              mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
@@ -2876,6 +3612,7 @@ class NasberryTests(unittest.TestCase):
     ):
         with mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
              mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+             mock.patch.object(nasberrypi, "migrate_missing_legacy_shares_file", return_value=True), \
              mock.patch.object(nasberrypi, "share_config_preflight", return_value=True), \
              mock.patch("builtins.print"):
             self.assertFalse(nasberrypi.repair_samba_share())
