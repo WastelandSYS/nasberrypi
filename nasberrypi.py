@@ -588,7 +588,15 @@ def unmount_storage():
         log("⚠ Storage is mounted outside the Nasberry mount point")
         log(f"Current mount point : {mount_point}")
         log(f"Nasberry mount point: {MOUNT_POINT}")
-        answer = input("Unmount this drive anyway? [y/N]: ").strip().lower()
+        if not sys.stdin.isatty():
+            log("✖ Confirmation is required before unmounting externally mounted storage.")
+            log("Run this command interactively to continue.")
+            return False
+        try:
+            answer = input("Unmount this drive anyway? [y/N]: ").strip().lower()
+        except EOFError:
+            log("✖ Confirmation is required before unmounting externally mounted storage.")
+            return False
         if answer not in {"y", "yes"}:
             log("Unmount cancelled")
             write_state(True, service_active())
@@ -1347,6 +1355,15 @@ def manage_shares():
         log(f"✖ Share configuration error: {exc}")
         log("Inspect or repair the shares file, or run 'sudo nasberry setup' if this is a new install.")
         return False
+
+    def save_managed_shares():
+        try:
+            save_shares(shares)
+            return True
+        except OSError as exc:
+            log(f"✖ Could not save share configuration {SHARES_FILE}: {exc}")
+            return False
+
     while True:
         print_shares(shares)
         print("\n  1) Create share")
@@ -1368,7 +1385,8 @@ def manage_shares():
                 log(f"✖ {reason}")
                 continue
             shares.append(share)
-            save_shares(shares)
+            if not save_managed_shares():
+                return False
             log(f"✔ Added share [{share['name']}]")
         elif choice in {"2", "3", "4"}:
             share = choose_share(shares)
@@ -1377,17 +1395,20 @@ def manage_shares():
                 continue
             if choice == "2":
                 share["enabled"] = not share.get("enabled", True)
-                save_shares(shares)
+                if not save_managed_shares():
+                    return False
                 log(f"✔ [{share['name']}] is now {'enabled' if share['enabled'] else 'disabled'}")
             elif choice == "3":
                 share["read_only"] = not share.get("read_only", False)
-                save_shares(shares)
+                if not save_managed_shares():
+                    return False
                 log(f"✔ [{share['name']}] is now {'read-only' if share['read_only'] else 'read-write'}")
             else:
                 answer = input(f"Remove [{share['name']}] from Nasberry management? Data is not deleted. [y/N]: ").strip().lower()
                 if answer in {"y", "yes"}:
                     shares.remove(share)
-                    save_shares(shares)
+                    if not save_managed_shares():
+                        return False
                     log(f"✔ Removed [{share['name']}] from Nasberry management")
         elif choice == "5":
             if ensure_share_folders() and configure_samba_share() and restart_samba_service():
@@ -1619,11 +1640,16 @@ def configure_samba_share():
     log("Updating the NasberryPi managed Samba section only.")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = smb_file.with_name(f"{smb_file.name}.nasberry.{timestamp}.bak")
-    shutil.copy2(smb_file, backup)
-    log(f"Preserved previous Samba configuration at {backup}")
-    descriptor, candidate_name = tempfile.mkstemp(prefix=f".{smb_file.name}.nasberry.", dir=smb_file.parent)
-    candidate = Path(candidate_name)
     try:
+        shutil.copy2(smb_file, backup)
+    except OSError as exc:
+        log(f"✖ Could not preserve Samba configuration backup {backup}: {exc}")
+        return False
+    log(f"Preserved previous Samba configuration at {backup}")
+    candidate = None
+    try:
+        descriptor, candidate_name = tempfile.mkstemp(prefix=f".{smb_file.name}.nasberry.", dir=smb_file.parent)
+        candidate = Path(candidate_name)
         with os.fdopen(descriptor, "w") as handle:
             handle.write(replace_managed_samba_section(smb_file.read_text(), managed_section))
             handle.flush()
@@ -1635,17 +1661,27 @@ def configure_samba_share():
             log(f"✖ Samba config validation failed: {detail}")
             return False
         os.replace(candidate, smb_file)
+    except OSError as exc:
+        log(f"✖ Could not update Samba configuration {smb_file}: {exc}")
+        return False
     finally:
-        try:
-            candidate.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if candidate is not None:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
     valid, reason = samba_config_valid()
     if valid:
         log("✔ Samba configured with Nasberry managed shares")
         return True
-    shutil.copy2(backup, smb_file)
     log(f"✖ Samba config validation failed: {reason}")
+    try:
+        shutil.copy2(backup, smb_file)
+    except OSError as exc:
+        log(f"✖ Automatic restore from backup failed: {exc}")
+        log(f"Preserved backup: {backup}")
+        log("Review the backup, restore a safe Samba configuration if needed, then run 'sudo nasberry repair-samba'.")
+        return False
     log("✔ Restored the previous Samba configuration")
     return False
 
@@ -1676,10 +1712,7 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
         return False
     if not share_config_preflight():
         return False
-    settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}"
-    settings["mount_point"] = MOUNT_POINT
-    settings["share_name"] = "Public"
-    settings["share_user"] = share_user
+    pin_hash = settings.get("pin_hash", "")
     if not skip_pin:
         if non_interactive:
             log("✖ Non-interactive setup requires --skip-pin; run interactive setup afterward to set a PIN.")
@@ -1689,8 +1722,22 @@ def setup(non_interactive=False, skip_pin=False, share_user_arg=None):
         if len(first) < 4 or first != second:
             log("✖ PINs did not match or were too short")
             return False
-        settings["pin_hash"] = hash_pin(first)
-    save_config()
+        pin_hash = hash_pin(first)
+    previous_settings = dict(settings)
+    settings["device"] = f"/dev/disk/by-uuid/{selected['uuid']}"
+    settings["mount_point"] = MOUNT_POINT
+    settings["share_name"] = "Public"
+    settings["share_user"] = share_user
+    if not skip_pin:
+        settings["pin_hash"] = pin_hash
+    try:
+        save_config()
+    except OSError as exc:
+        settings.clear()
+        for key, value in previous_settings.items():
+            settings[key] = value
+        log(f"✖ Could not save configuration {CONFIG_FILE}: {exc}")
+        return False
     if not publish_config_from_disk():
         detail, fix = config_problem()
         log(f"✖ Saved configuration could not be validated: {detail}")
@@ -2207,5 +2254,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(0 if main() else 1)
     except KeyboardInterrupt:
-        log("Interrupted; no additional changes were made")
+        log("Interrupted; operation stopped. Run 'nasberry status' to verify the current state before retrying.")
         raise SystemExit(130)
