@@ -112,7 +112,7 @@ sudo nasberry doctor
 Network share running and accessible from other devices.
 
 <p align="center">
-<img width="900" height="900" alt="NasberryWorking" src="https://github.com/user-attachments/assets/09a76b4c-4807-45dc-814d-bbba1bac449c" />
+<img width="900" height="972" alt="NasberryWorking" src="https://github.com/user-attachments/assets/09a76b4c-4807-45dc-814d-bbba1bac449c" />
 </p>
 
 ---
