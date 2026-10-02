@@ -325,7 +325,10 @@ def save_config():
         os.chmod(temp, 0o600)
         temp.replace(CONFIG_FILE)
     except BaseException:
-        temp.unlink(missing_ok=True)
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -728,7 +731,10 @@ def save_shares(shares):
         os.chmod(temp, 0o600)
         temp.replace(SHARES_FILE)
     except BaseException:
-        temp.unlink(missing_ok=True)
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -1630,7 +1636,10 @@ def configure_samba_share():
             return False
         os.replace(candidate, smb_file)
     finally:
-        candidate.unlink(missing_ok=True)
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
     valid, reason = samba_config_valid()
     if valid:
         log("✔ Samba configured with Nasberry managed shares")

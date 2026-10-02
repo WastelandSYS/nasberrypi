@@ -205,6 +205,27 @@ class NasberryTests(unittest.TestCase):
             self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(list(Path(directory).glob(".config.ini.*")), [])
 
+    def test_save_config_preserves_primary_failure_when_cleanup_fails(self):
+        primary = OSError("primary config failure")
+        cleanup = PermissionError("cleanup failure")
+        original_unlink = Path.unlink
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.ini"
+            config_file.write_text("original config")
+
+            def unlink(path, *args, **kwargs):
+                if path.parent == config_file.parent and path.name.startswith(".config.ini."):
+                    raise cleanup
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(nasberrypi, "CONFIG_FILE", config_file), \
+                 mock.patch.object(nasberrypi.os, "fsync", side_effect=primary), \
+                 mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
+                with self.assertRaises(OSError) as raised:
+                    nasberrypi.save_config()
+            self.assertIs(raised.exception, primary)
+            self.assertEqual(config_file.read_text(), "original config")
+
     def test_share_user_rejects_samba_configuration_injection(self):
         self.assertTrue(nasberrypi.valid_share_user("nasuser"))
         self.assertFalse(nasberrypi.valid_share_user("user\nadmin users = root"))
@@ -646,6 +667,52 @@ class NasberryTests(unittest.TestCase):
         self.assertFalse(shares[0]["enabled"])
         with mock.patch.object(nasberrypi, "load_shares", return_value=shares):
             self.assertEqual(nasberrypi.enabled_shares(), [])
+
+    def test_save_shares_writes_json_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            share = {"name": "Media", "path": "/mnt/nasberry/Media", "enabled": False, "read_only": True}
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file):
+                nasberrypi.save_shares([share])
+            self.assertEqual(json.loads(shares_file.read_text()), {"shares": [share]})
+            self.assertEqual(shares_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(Path(directory).glob(".shares.json.*")), [])
+
+    def test_save_shares_preserves_primary_failure_when_cleanup_fails(self):
+        primary = OSError("primary save failure")
+        cleanup = PermissionError("cleanup failure")
+        original_unlink = Path.unlink
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            original = '{"shares":[{"name":"Keep"}]}\n'
+            shares_file.write_text(original)
+
+            def unlink(path, *args, **kwargs):
+                if path.parent == shares_file.parent and path.name.startswith(".shares.json."):
+                    raise cleanup
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi.os, "fsync", side_effect=primary), \
+                 mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink):
+                with self.assertRaises(OSError) as raised:
+                    nasberrypi.save_shares([])
+            self.assertIs(raised.exception, primary)
+            self.assertEqual(shares_file.read_text(), original)
+
+    def test_save_shares_removes_temp_file_after_primary_failure(self):
+        primary = OSError("primary save failure")
+        with tempfile.TemporaryDirectory() as directory:
+            shares_file = Path(directory) / "shares.json"
+            original = '{"shares":[{"name":"Keep"}]}\n'
+            shares_file.write_text(original)
+            with mock.patch.object(nasberrypi, "SHARES_FILE", shares_file), \
+                 mock.patch.object(nasberrypi.os, "fsync", side_effect=primary):
+                with self.assertRaises(OSError) as raised:
+                    nasberrypi.save_shares([])
+            self.assertIs(raised.exception, primary)
+            self.assertEqual(shares_file.read_text(), original)
+            self.assertEqual(list(Path(directory).glob(".shares.json.*")), [])
 
     def test_ensure_default_shares_file_bootstraps_only_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1125,6 +1192,33 @@ class NasberryTests(unittest.TestCase):
                  mock.patch.object(nasberrypi, "share_user_preflight", return_value=True):
                 self.assertFalse(nasberrypi.configure_samba_share())
             self.assertEqual(smb_file.read_text(), "original config")
+
+    @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
+    @mock.patch.object(nasberrypi, "load_shares", return_value=[{"name": "Public", "path": "/mnt/nasberry/Public", "enabled": True, "read_only": False}])
+    @mock.patch.object(nasberrypi, "run")
+    def test_configure_samba_candidate_cleanup_failure_does_not_mask_rejection(self, run, _load_shares, _preflight):
+        run.return_value.returncode = 1
+        run.return_value.stderr = "candidate invalid"
+        run.return_value.stdout = ""
+        original_unlink = Path.unlink
+        with tempfile.TemporaryDirectory() as directory:
+            smb_file = Path(directory) / "smb.conf"
+            smb_file.write_text("original config")
+
+            def unlink(path, *args, **kwargs):
+                if path.parent == smb_file.parent and path.name.startswith(".smb.conf.nasberry."):
+                    raise PermissionError("cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(nasberrypi, "Path", side_effect=lambda value: smb_file if value == "/etc/samba/smb.conf" else Path(value)), \
+                 mock.patch.object(nasberrypi, "SHARE_USER", "kali"), \
+                 mock.patch.object(nasberrypi, "share_user_preflight", return_value=True), \
+                 mock.patch.object(Path, "unlink", autospec=True, side_effect=unlink), \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(nasberrypi.configure_samba_share())
+            self.assertEqual(smb_file.read_text(), "original config")
+        rendered = "\n".join(call.args[0] for call in output.call_args_list)
+        self.assertIn("Samba config validation failed: candidate invalid", rendered)
 
     @mock.patch.object(nasberrypi, "samba_config_preflight", return_value=True)
     @mock.patch.object(nasberrypi, "samba_shares", return_value={"OtherShare": {"path": "/srv/other"}})
