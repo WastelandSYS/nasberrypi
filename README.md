@@ -74,7 +74,7 @@ sudo nasberry
 ```
 
 <p align="center">
-<img width="642" height="478" alt="NasberryMainMenu" src="https://github.com/user-attachments/assets/ab09b9db-d5e8-4dca-bf81-6c9ada583698" />
+<img width="702" height="484" alt="NasberrypiMainMenuV0 4 0~" src="https://github.com/user-attachments/assets/4973e340-99a8-44aa-b33d-01b0e97ecccc" />
 </p>
 
 ---
@@ -102,7 +102,7 @@ sudo nasberry doctor
 ```
 
 <p align="center">
-<img width="674" height="753" alt="NasberryDiagnostics" src="https://github.com/user-attachments/assets/91918795-c6c7-4454-98ac-d1e255ec3aee" />
+<img width="747" height="795" alt="NasberrypiDiagnosticsV0 4 0~" src="https://github.com/user-attachments/assets/7d3c05c8-6163-4e78-86c1-87c90de03eec" />
 </p>
 
 ---
@@ -112,7 +112,7 @@ sudo nasberry doctor
 Network share running and accessible from other devices.
 
 <p align="center">
-<img width="1000" height="1080" alt="NasberryWorking" src="https://github.com/user-attachments/assets/09a76b4c-4807-45dc-814d-bbba1bac449c" />
+<img width="900" height="900" alt="NasberryWorking" src="https://github.com/user-attachments/assets/09a76b4c-4807-45dc-814d-bbba1bac449c" />
 </p>
 
 ---
