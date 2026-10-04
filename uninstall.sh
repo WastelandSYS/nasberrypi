@@ -136,10 +136,15 @@ remove_application_files() {
 
 remove_managed_share() {
     [ -f "$SMB_CONF" ] || { log "Samba config not found; skipping managed-share cleanup."; return 0; }
-    local marker="# Managed by Nasberry: $SHARE_NAME"
+    local marker_prefix="# Managed by Nasberry: "
     local appliance_header="# Managed by Nasberry appliance mode. Previous config is saved before replacement."
+    local appliance_marker="# Managed by Nasberry appliance mode"
+    local appliance_begin="# BEGIN Managed by Nasberry appliance mode"
+    local appliance_end="# END Managed by Nasberry appliance mode"
+    local disable_comment="# Nasberry appliance mode: disable share"
     local shares_begin="# BEGIN NasberryPi managed shares"
-    if ! grep -Fq "$marker" "$SMB_CONF" && ! grep -Fq "# BEGIN Managed by Nasberry appliance mode" "$SMB_CONF" && ! grep -Fq "$appliance_header" "$SMB_CONF" && ! grep -Fq "$shares_begin" "$SMB_CONF"; then
+    local shares_end="# END NasberryPi managed shares"
+    if ! grep -Fq "$marker_prefix" "$SMB_CONF" && ! grep -Fq "$appliance_begin" "$SMB_CONF" && ! grep -Fq "$appliance_end" "$SMB_CONF" && ! grep -Fq "$appliance_header" "$SMB_CONF" && ! grep -Fq "$appliance_marker" "$SMB_CONF" && ! grep -Fq "$disable_comment" "$SMB_CONF" && ! grep -Fq "$shares_begin" "$SMB_CONF" && ! grep -Fq "$shares_end" "$SMB_CONF"; then
         log "No Nasberry-managed Samba settings found; leaving Samba configuration unchanged."
         return 0
     fi
@@ -155,58 +160,182 @@ remove_managed_share() {
     backup="${SMB_CONF}.nasberry-uninstall.$(date +%Y%m%d%H%M%S%N).bak"
     temp="$(mktemp "${SMB_CONF}.nasberry-uninstall.XXXXXX")"
     cp -a "$SMB_CONF" "$backup"
-    python3 - "$SMB_CONF" "$temp" "$marker" "$appliance_header" "$SHARE_NAME" "$shares_begin" <<'PY'
+    if ! python3 - "$SMB_CONF" "$temp" "$marker_prefix" "$appliance_header" "$appliance_marker" "$appliance_begin" "$appliance_end" "$disable_comment" "$shares_begin" "$shares_end" "$MOUNT_POINT" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
-marker = sys.argv[3]
+marker_prefix = sys.argv[3]
 appliance_header = sys.argv[4]
-share_header = f"[{sys.argv[5]}]".lower()
-shares_begin = sys.argv[6]
-shares_end = "# END NasberryPi managed shares"
+appliance_marker = sys.argv[5]
+appliance_begin = sys.argv[6]
+appliance_end = sys.argv[7]
+disable_comment = sys.argv[8]
+shares_begin = sys.argv[9]
+shares_end = sys.argv[10]
+mount_point = sys.argv[11]
+user_share_limit = "usershare max shares = 0"
+default_public_path = os.path.join(mount_point, "Public")
 lines = source.read_text().splitlines(keepends=True)
-current_appliance = any(line.strip() == appliance_header for line in lines)
-output = []
-in_managed_block = False
-skip_section = False
-skip_disabled_setting = False
-for line in lines:
+
+
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def section_name(line):
     stripped = line.strip()
-    if stripped == "# BEGIN Managed by Nasberry appliance mode":
-        in_managed_block = True
-        continue
-    if stripped == shares_begin:
-        in_managed_block = True
-        continue
-    if stripped == "# END Managed by Nasberry appliance mode":
-        in_managed_block = False
-        continue
-    if stripped == shares_end:
-        in_managed_block = False
-        continue
-    if in_managed_block:
-        continue
-    if skip_disabled_setting:
-        skip_disabled_setting = False
-        continue
-    if stripped == "# Nasberry appliance mode: disable share":
-        skip_disabled_setting = True
-        continue
-    if stripped in {appliance_header, "# Managed by Nasberry appliance mode", "usershare max shares = 0"}:
-        continue
-    if stripped == marker or (current_appliance and stripped.lower() == share_header):
-        skip_section = True
-        continue
-    if skip_section:
-        if line.lstrip().startswith("["):
-            skip_section = False
-        else:
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped[1:-1].strip()
+    return None
+
+
+def marker_bounds(begin_marker, end_marker, label):
+    begins = [index for index, line in enumerate(lines) if line.strip() == begin_marker]
+    ends = [index for index, line in enumerate(lines) if line.strip() == end_marker]
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1:
+        fail(f"{label} markers are malformed")
+    begin, end = begins[0], ends[0]
+    if begin >= end:
+        fail(f"{label} markers are out of order")
+    return begin, end
+
+
+def add_range(ranges, start, end, label):
+    if start >= end:
+        fail(f"{label} ownership range is empty")
+    for existing_start, existing_end, existing_label in ranges:
+        if start < existing_end and existing_start < end:
+            fail(f"{label} overlaps {existing_label}")
+    ranges.append((start, end, label))
+
+
+def section_end(start):
+    end = start + 1
+    while end < len(lines) and section_name(lines[end]) is None:
+        end += 1
+    return end
+
+
+def legacy_marker_name(line):
+    stripped = line.strip()
+    if stripped.startswith(marker_prefix):
+        return stripped[len(marker_prefix):].strip()
+    return None
+
+
+def marked_share_range(marker_index, share_name):
+    section_index = marker_index + 1
+    while section_index < len(lines) and not lines[section_index].strip():
+        section_index += 1
+    found = section_name(lines[section_index]) if section_index < len(lines) else None
+    if not found or found.lower() != share_name.lower():
+        detail = share_name or "<empty>"
+        fail(f"legacy Nasberry share marker is ambiguous: {detail}")
+    return marker_index, section_end(section_index)
+
+
+def contains_index(ranges, index):
+    return any(start <= index < end for start, end, _label in ranges)
+
+
+def samba_sections_outside(ranges):
+    sections = []
+    index = 0
+    while index < len(lines):
+        name = section_name(lines[index])
+        if name is None:
+            index += 1
             continue
-    output.append(line)
+        end = section_end(index)
+        if not contains_index(ranges, index):
+            options = {}
+            for raw_line in lines[index + 1:end]:
+                if "=" in raw_line:
+                    key, value = raw_line.split("=", 1)
+                    options[key.strip().lower()] = value.strip()
+            sections.append({"name": name, "start": index, "end": end, "options": options})
+        index = end
+    return sections
+
+
+def section_is_default_public(section):
+    if section["name"].lower() != "public":
+        return False
+    path = section["options"].get("path", "")
+    if os.path.abspath(path) != os.path.abspath(default_public_path):
+        return False
+    read_only = section["options"].get("read only", "no").lower() in {"yes", "true"}
+    return not read_only
+
+
+ranges = []
+current_bounds = marker_bounds(shares_begin, shares_end, "NasberryPi managed Samba section")
+if current_bounds is not None:
+    add_range(ranges, current_bounds[0], current_bounds[1] + 1, "current NasberryPi managed section")
+
+legacy_bounds = marker_bounds(appliance_begin, appliance_end, "legacy Nasberry appliance section")
+if legacy_bounds is not None:
+    add_range(ranges, legacy_bounds[0], legacy_bounds[1] + 1, "legacy Nasberry appliance section")
+
+for index, line in enumerate(lines):
+    if contains_index(ranges, index):
+        continue
+    share_name = legacy_marker_name(line)
+    if share_name is not None:
+        start, end = marked_share_range(index, share_name)
+        add_range(ranges, start, end, f"legacy Nasberry share {share_name}")
+
+for index, line in enumerate(lines):
+    if contains_index(ranges, index):
+        continue
+    stripped = line.strip()
+    if stripped == disable_comment:
+        if index + 1 >= len(lines) or lines[index + 1].strip().lower() != "available = no":
+            fail("legacy Nasberry appliance disable marker is ambiguous")
+        add_range(ranges, index, index + 2, "legacy Nasberry disable directive")
+    elif stripped == appliance_marker:
+        fail("standalone legacy Nasberry appliance marker is ambiguous")
+
+legacy_appliance_file = any(line.strip() == appliance_header for line in lines)
+if legacy_appliance_file:
+    public_sections = [
+        section for section in samba_sections_outside(ranges)
+        if section["name"].lower() == "public"
+    ]
+    default_public_sections = [
+        section for section in public_sections
+        if section_is_default_public(section)
+    ]
+    if len(public_sections) > 1 or (public_sections and len(default_public_sections) != 1):
+        fail("legacy Nasberry appliance Public share is ambiguous")
+    for index, line in enumerate(lines):
+        if contains_index(ranges, index):
+            continue
+        stripped = line.strip()
+        if stripped == appliance_header:
+            add_range(ranges, index, index + 1, "legacy Nasberry appliance header")
+        elif stripped.lower() == user_share_limit:
+            add_range(ranges, index, index + 1, "legacy Nasberry usershare limit")
+    if default_public_sections:
+        section = default_public_sections[0]
+        add_range(ranges, section["start"], section["end"], "legacy Nasberry appliance Public share")
+
+output = [
+    line for index, line in enumerate(lines)
+    if not contains_index(ranges, index)
+]
 destination.write_text("".join(output))
 PY
+    then
+        rm -f "$temp"
+        die "Nasberry-managed Samba cleanup could not be performed safely. Live configuration was not changed. Backup: $backup"
+    fi
     if ! testparm -s "$temp" >/dev/null 2>&1; then
         rm -f "$temp"
         die "Samba validation failed; live configuration was not changed. Backup: $backup"
